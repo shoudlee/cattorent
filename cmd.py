@@ -1,4 +1,5 @@
 from protocol import CattorrentProtocol, UdpBroadcastWorker
+import uuid
 
 class ClientStatus:
     def __init__(self):
@@ -23,10 +24,15 @@ class ClientStatus:
         if not self.online_status:
             print("Client is offline. Please go online first.")
             return
+        try:
+            peer_id = uuid.UUID(peer_id)
+        except ValueError:
+            print("Invalid peer ID format. Please provide a valid UUID.")
+            return
         if peer_id not in self.cattorrent_protocol.peers:
             print(f"Peer {peer_id} not found.")
             return
-        list = self.cattorrent_protocol.get_peer_list(peer_id)
+        self.cattorrent_protocol.get_peer_list(peer_id)
 
     def file(self, dst, filename):
         pass

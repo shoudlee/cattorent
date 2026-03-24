@@ -52,7 +52,7 @@ class CattorrentProtocol:
         except Exception as e:
             print(f"Failed to connect to peer {peer_id} at {peer_info.ip}:{peer_info.port}: {e}")
             return
-        self.tcp_connections[(peer_info.ip, peer_info.port)] = handler
+        self.tcp_connections[sock.getpeername()] = handler
         handler.start()
         handler.queue.put({'command': 'LIST'})
 
@@ -175,16 +175,24 @@ class TcpRecvWorker(threading.Thread):
         self.recv_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.recv_socket.bind((self.cattorrent_protocol.ip, self.cattorrent_protocol.port))
         self.recv_socket.listen()
+        self.recv_socket.settimeout(0.5)
 
     def run(self) -> None:
         self.setup_socket()
         while not self.stop_event.is_set():
             try:
                 conn, addr = self.recv_socket.accept()
-                print(f"Accepted TCP connection from {addr}")
-                self.cattorrent_protocol.tcp_connections[addr] = TcpSendWorker(
-                    self.cattorrent_protocol, conn)
-                self.cattorrent_protocol.tcp_connections[addr].start() 
+                peer_ip = addr[0]
+                # 从已知 peers 里查找这个 IP 对应的监听端口
+                peer_port = next(
+                    (info.port for info, _ in self.cattorrent_protocol.peers.values() if info.ip == peer_ip),
+                    addr[1]  # 找不到时退化到临时端口
+                )
+                worker = TcpSendWorker(self.cattorrent_protocol, conn)
+                self.cattorrent_protocol.tcp_connections[(peer_ip, peer_port)] = worker
+                worker.start() 
+            except socket.timeout:
+                continue
             except Exception as e:
                 print(f"TCP Receive Worker error: {e}")
                 return
@@ -197,8 +205,8 @@ class TcpSendWorker(threading.Thread):
         self.queue = Queue()
         # socket.setblocking(False)
         # 后期改为select或epoll来处理多个连接，现在先简单地把它设置为非阻塞，并在recv时捕获BlockingIOError异常
-        self.socket.settimeout(0.1)
         self.socket = socket
+        self.socket.settimeout(0.1)
     
     def stop(self):
         self.stop_event.set()
@@ -215,11 +223,11 @@ class TcpSendWorker(threading.Thread):
         file_content = bytes()
         if file_count > 0:
             for filename, filesize in file.items():
-                filename_length = len(filename_bytes)
                 filename_bytes = filename.encode()
+                filename_length = len(filename_bytes)
                 file_content += struct.pack('!H', filename_length) + filename_bytes + struct.pack('!Q', filesize)
         
-        return struct.pack('!I4sH', 4 + 2 + len(file_content), b'LIST', file_count) + file_content
+        return struct.pack('!I4sH', 4 + 2 + len(file_content), b'RLST', file_count) + file_content
 
     def handle_list_response(self, packet):
         file_count = struct.unpack('!H', packet[:2])[0]
@@ -256,17 +264,20 @@ class TcpSendWorker(threading.Thread):
                 if not data_length_bytes:
                     # 连接被对方关闭了
                     self.stop()
-                    self.cattorrent_protocol.tcp_connections.pop(self.socket.getpeername(), None)
+                    peer_key = next((key for key, handler in self.cattorrent_protocol.tcp_connections.items() 
+                                     if handler == self), None )
+                    if peer_key:
+                        del self.cattorrent_protocol.tcp_connections[peer_key]
                     return
                 data_length = struct.unpack('!I', data_length_bytes)[0]
-            except BlockingIOError: 
+            except socket.timeout: 
                 continue
             data = bytes()
             while len(data) < data_length:
                 try:
                     chunk = self.socket.recv(data_length - len(data))
                     data += chunk
-                except BlockingIOError:
+                except socket.timeout:
                     continue
             command = struct.unpack('!4s', data[:4])[0].decode()
             if command == 'LIST':
