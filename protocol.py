@@ -196,6 +196,11 @@ class TcpRecvWorker(threading.Thread):
             except Exception as e:
                 print(f"TCP Receive Worker error: {e}")
                 return
+    
+    def stop(self):
+        for handler in self.cattorrent_protocol.tcp_connections.values():
+            handler.stop()
+        self.stop_event.set()
 
 class TcpSendWorker(threading.Thread):
     def __init__(self, cattorrent_protocol: CattorrentProtocol, socket: socket.socket):

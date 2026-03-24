@@ -47,8 +47,11 @@ def main():
         command = input("Enter a command (or 'exit' to quit): ")
         if command.lower() == 'exit':
             print("Exiting the program.")
-            client.cattorrent_protocol.upd_handler.stop()  # 停止UDP广播线程
-            client.cattorrent_protocol.upd_handler.join()  # 等待UDP广播线程结束
+            if client.online_status:
+                client.cattorrent_protocol.upd_handler.stop()  # 停止UDP广播线程
+                client.cattorrent_protocol.tcp_recv_handler.stop()  # 停止TCP监听线程
+                client.cattorrent_protocol.upd_handler.join()  # 等待UDP广播线程结束
+                client.cattorrent_protocol.tcp_recv_handler.join()  # 等待TCP监听线程结束
             exit(0)
 
         match command.split():
