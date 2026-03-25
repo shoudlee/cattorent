@@ -100,6 +100,10 @@ class CattorrentProtocol:
         for peer_id in expired_peers:
             del self.peers[peer_id]        
 
+    def get_peer_key_by_ip(self, ip):
+        self.refresh_peers()
+        return next(((info.ip, info.port) for info, _ in self.peers.values() if info.ip == ip), None)
+
 @dataclass
 class PeerInfo:
     ip: str
@@ -173,16 +177,14 @@ class TcpListenWorker(threading.Thread):
         while not self.stop_event.is_set():
             try:
                 conn, addr = self.recv_socket.accept()
-                peer_ip = addr[0]
-                # 从已知 peers 里查找这个 IP 对应的监听端口,如果peer中没有则忽略
-                peer_port = next((info.port for info, _ in self.cattorrent_protocol.peers.values() if info.ip == peer_ip), None)
-                if peer_port is None:
+                peer_key = self.cattorrent_protocol.get_peer_key_by_ip(addr[0])
+                if peer_key is None:
                     conn.close()
                     continue
                 # 不知道有什么用，但是感觉加一个timeout比较好，防止某些异常情况导致线程一直阻塞在recv上
                 conn.settimeout(0.1)
                 send_worker = TcpSendWorker(self.cattorrent_protocol, conn)
-                self.cattorrent_protocol.tcp_connections[(peer_ip, peer_port)] = send_worker
+                self.cattorrent_protocol.tcp_connections[peer_key] = send_worker
                 send_worker.start() 
                 TcpRecvWorker(self.cattorrent_protocol, conn).start() 
 
@@ -205,8 +207,10 @@ class TcpRecvWorker(threading.Thread):
         self.socket = socket
 
     def get_peer_key(self):
-        ip = self.socket.getpeername()[0]
-        return next(((info.ip, info.port) for info, _ in self.cattorrent_protocol.peers.values() if info.ip == ip), None)
+        try:
+            return self.cattorrent_protocol.get_peer_key_by_ip(self.socket.getpeername()[0])
+        except OSError:
+            return None
     
     def handle_list_response(self, packet):
         file_count = struct.unpack('!I', packet[:4])[0]
