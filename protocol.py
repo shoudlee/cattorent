@@ -6,6 +6,8 @@ import uuid
 from dataclasses import dataclass
 from queue import Queue, Empty
 from pathlib import Path
+from tcp_recv_worker import TcpRecvWorker
+from tcp_send_worker import TcpSendWorker
 
 class CattorrentProtocol:
     def __init__(self, ip='0.0.0.0', port=9822, broadcast_interval=2, share_folder="./catshare"):
@@ -198,120 +200,4 @@ class TcpListenWorker(threading.Thread):
     def stop(self):
         for handler in self.cattorrent_protocol.tcp_connections.values():
             handler.stop()
-        self.stop_event.set()
-
-class TcpRecvWorker(threading.Thread):
-    def __init__(self, cattorrent_protocol: CattorrentProtocol, socket: socket.socket):
-        super().__init__()
-        self.cattorrent_protocol = cattorrent_protocol
-        self.stop_event = threading.Event()
-        self.socket = socket
-
-    def get_peer_key(self):
-        try:
-            return self.cattorrent_protocol.get_peer_key_by_ip(self.socket.getpeername()[0])
-        except OSError:
-            return None
-    
-    def handle_list_response(self, packet):
-        file_count = struct.unpack('!I', packet[:4])[0]
-        files = []
-        offset = 4
-        for _ in range(file_count):
-            filename_length = struct.unpack('!H', packet[offset:offset+2])[0]
-            offset += 2
-            filename = packet[offset:offset+filename_length].decode()
-            offset += filename_length
-            filesize = struct.unpack('!Q', packet[offset:offset+8])[0]
-            offset += 8
-            files.append((filename, filesize))
-        return files
-    
-    def stop(self):
-        self.stop_event.set()
-
-    def run(self) -> None:
-        while not self.stop_event.is_set():
-            # 处理收到的消息
-            try:
-                data_length_bytes = self.socket.recv(4)
-                if not data_length_bytes:
-                    # 连接被对方关闭了，这里还需要停止掉对应的tcp_sender_worker，并从tcp_connections里删除这个连接
-                    self.stop()
-                    peer_key = self.get_peer_key()
-                    if peer_key and peer_key in self.cattorrent_protocol.tcp_connections:
-                        self.cattorrent_protocol.tcp_connections[peer_key].stop()
-                        del self.cattorrent_protocol.tcp_connections[peer_key]
-                    return
-                data_length = struct.unpack('!I', data_length_bytes)[0]
-            except socket.timeout: 
-                continue
-            data = bytes()
-            while len(data) < data_length:
-                try:
-                    chunk = self.socket.recv(data_length - len(data))
-                    data += chunk
-                except socket.timeout:
-                    continue
-            command = struct.unpack('!4s', data[:4])[0].decode()
-            if command == 'LIST':
-                peer_key = self.get_peer_key()
-                if peer_key and peer_key in self.cattorrent_protocol.tcp_connections:
-                    self.cattorrent_protocol.tcp_connections[peer_key].queue.put({'command': 'RESPONSE_LIST'})
-            if command == 'RLST':
-                files = self.handle_list_response(data[4:])
-                print("\nReceived file list:")
-                for filename, filesize in files:
-                    print(f"{filename} ({filesize} bytes)")
-
-class TcpSendWorker(threading.Thread):
-    def __init__(self, cattorrent_protocol: CattorrentProtocol, socket: socket.socket):
-        super().__init__()
-        self.cattorrent_protocol = cattorrent_protocol
-        self.stop_event = threading.Event()
-        self.queue = Queue()
-        # socket.setblocking(False)
-        # 后期改为select或epoll来处理多个连接，现在先简单地把它设置为非阻塞，并在recv时捕获BlockingIOError异常
-        self.socket = socket
-        # self.socket.settimeout(0.1)
-    
-    def stop(self):
-        self.stop_event.set()
-    
-    def handle_list_request(self):
-        # 获取share文件夹中的filename和size
-        file = {}
-        for p in Path(self.cattorrent_protocol.share_folder).iterdir():
-            if p.is_file():
-                file[p.name] = p.stat().st_size
-        # 构造响应
-        file_count = len(file)
-        file_content = bytes()
-        if file_count > 0:
-            for filename, filesize in file.items():
-                filename_bytes = filename.encode()
-                filename_length = len(filename_bytes)
-                file_content += struct.pack('!H', filename_length) + filename_bytes + struct.pack('!Q', filesize)
-        
-        return struct.pack('!I4sI', 4 + 4 + len(file_content), b'RLST', file_count) + file_content
-
-    def run(self) -> None:
-        task = None
-        while not self.stop_event.is_set():
-            # 从queue中获取任务并处理，来自于TCP接收线程的任务会被放到这个queue里
-            try:
-                if task is None:
-                    task = self.queue.get()
-                # 任务的格式应该是一个字典，包含command和其他必要的信息
-                if task['command'] == 'LIST':
-                    msg = struct.pack('!I4s', 4, b'LIST')
-                    self.socket.sendall(msg)
-                    task = None
-                elif task['command'] == 'RESPONSE_LIST':
-                    msg = self.handle_list_request()
-                    self.socket.sendall(msg)
-                    task = None
-            # 防止sendall超时，保留现存的任务继续尝试发送
-            except socket.timeout:
-                continue
-            
+        self.stop_event.set() 
