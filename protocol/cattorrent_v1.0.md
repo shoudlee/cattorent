@@ -52,6 +52,7 @@ empty
 ### **Response:** 
 **Command：** **RLST**
 **Body：**
+
 ```
 uint32 file_count
 
@@ -63,18 +64,23 @@ repeat file_count:
 
 ## **4. 获取 Meta 信息**
 ### **Request:** 
-- file_hash = **文件内容 SHA-256**
-- piece_hash → 后期再加（否则 META 会爆）
+
 **Command：** **META**
 **Body：**
+
 ```
 uint16 name_len
 bytes  filename
 ```
 
 ### **Response:** 
+
+- file_hash = **文件内容 SHA-256**
+- piece_hash → 后期再加（否则 META 会爆）
+
 **Commnad：META**
 **Body：**
+
 ```
 uint64 file_size
 uint32 piece_size         # 固定 256KB 也可以写死，但建议返回

@@ -63,7 +63,6 @@ def main():
                 client.peer()
             case ['list', peer_id]:
                 client.list(peer_id)
-                command = input("Enter a command (or 'exit' to quit): ")
             case ['file', dst, filename]:
                 client.file(dst, filename)
             case _:
