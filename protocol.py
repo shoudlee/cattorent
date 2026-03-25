@@ -65,19 +65,6 @@ class CattorrentProtocol:
         message = struct.pack('!I4s', length, command.encode()) + body
         return message
     
-    # def decode_broadcast_message(self, message):
-    #     length, command = struct.unpack('!I4s', message[:8])
-    #     body = message[8:]
-    #     port, reserved, protocol_version, peer_id = struct.unpack('!HHI16s', body)
-    #     return {
-    #         'length': length,
-    #         'command': command.decode(),
-    #         'port': port,
-    #         'reserved': reserved,
-    #         'protocol_version': protocol_version,
-    #         'peer_id': uuid.UUID(bytes=peer_id)
-    #     }
-    
     def handle_received_udp_packet(self, ip, port, packet):
         try:
             # 对于udp来说，每次recv都是一个完整的packet，所以length时冗余的，但为了协议的完整性，我们还是保留它
@@ -193,7 +180,7 @@ class TcpListenWorker(threading.Thread):
                 send_worker = TcpSendWorker(self.cattorrent_protocol, conn)
                 self.cattorrent_protocol.tcp_connections[(peer_ip, peer_port)] = send_worker
                 send_worker.start() 
-                # 
+                TcpRecvWorker(self.cattorrent_protocol, conn).start() 
 
             except socket.timeout:
                 continue
