@@ -52,9 +52,13 @@ class CattorrentProtocol:
         except Exception as e:
             print(f"Failed to connect to peer {peer_id} at {peer_info.ip}:{peer_info.port}: {e}")
             return
+        # 统一使用对方的监听端口作为key
         self.tcp_connections[sock.getpeername()] = handler
         handler.start()
         handler.queue.put({'command': 'LIST'})
+        recv_handler = TcpRecvWorker(self, sock)
+        recv_handler.start()
+
 
     def encode_broadcast_message(self, command="ONLI"):
         reserved = 0
@@ -170,11 +174,10 @@ class TcpListenWorker(threading.Thread):
             try:
                 conn, addr = self.recv_socket.accept()
                 peer_ip = addr[0]
-                # 从已知 peers 里查找这个 IP 对应的监听端口
-                peer_port = next(
-                    (info.port for info, _ in self.cattorrent_protocol.peers.values() if info.ip == peer_ip),
-                    addr[1]  # 找不到时退化到临时端口
-                )
+                # 从已知 peers 里查找这个 IP 对应的监听端口,如果peer中没有则忽略
+                peer_port = next((info.port for info, _ in self.cattorrent_protocol.peers.values() if info.ip == peer_ip), 114514)
+                if peer_port == 114514:
+                    continue
                 # 不知道有什么用，但是感觉加一个timeout比较好，防止某些异常情况导致线程一直阻塞在recv上
                 conn.settimeout(0.1)
                 send_worker = TcpSendWorker(self.cattorrent_protocol, conn)
@@ -225,8 +228,8 @@ class TcpRecvWorker(threading.Thread):
                 if not data_length_bytes:
                     # 连接被对方关闭了，这里还需要停止掉对应的tcp_sender_worker，并从tcp_connections里删除这个连接
                     self.stop()
-                    peer_key = next((key for key, handler in self.cattorrent_protocol.tcp_connections.items() 
-                                        if handler == self), None )
+                    ip = self.socket.getpeername()[0]
+                    peer_key = [(info.ip, info.port) for info, _ in self.cattorrent_protocol.peers.values() if info.ip == ip][0]
                     if peer_key:
                         self.cattorrent_protocol.tcp_connections[peer_key].stop()
                         del self.cattorrent_protocol.tcp_connections[peer_key]
