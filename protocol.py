@@ -40,7 +40,7 @@ class CattorrentProtocol:
         peer_info = self.peers[peer_id][0]
         
         # 是否已经建立了TCP连接
-        if handler := self.tcp_connections.get((peer_info.ip, peer_info.port)):
+        if handler := self.tcp_connections.get(peer_info.ip):
             handler.queue.put({'command': 'LIST'})
             return
         
@@ -53,7 +53,7 @@ class CattorrentProtocol:
             print(f"Failed to connect to peer {peer_id} at {peer_info.ip}:{peer_info.port}: {e}")
             return
         # 统一使用对方的监听端口作为key
-        self.tcp_connections[(peer_info.ip, peer_info.port)] = handler
+        self.tcp_connections[peer_info.ip] = handler
         handler.start()
         handler.queue.put({'command': 'LIST'})
         recv_handler = TcpRecvWorker(self, sock)
@@ -102,7 +102,7 @@ class CattorrentProtocol:
 
     def get_peer_key_by_ip(self, ip):
         self.refresh_peers()
-        return next(((info.ip, info.port) for info, _ in self.peers.values() if info.ip == ip), None)
+        return next((info.ip for info, _ in self.peers.values() if info.ip == ip), None)
 
 @dataclass
 class PeerInfo:
@@ -179,6 +179,7 @@ class TcpListenWorker(threading.Thread):
                 conn, addr = self.recv_socket.accept()
                 peer_key = self.cattorrent_protocol.get_peer_key_by_ip(addr[0])
                 if peer_key is None:
+                    print("??????????")
                     conn.close()
                     continue
                 # 不知道有什么用，但是感觉加一个timeout比较好，防止某些异常情况导致线程一直阻塞在recv上
