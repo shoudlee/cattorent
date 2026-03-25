@@ -175,8 +175,9 @@ class TcpListenWorker(threading.Thread):
                 conn, addr = self.recv_socket.accept()
                 peer_ip = addr[0]
                 # 从已知 peers 里查找这个 IP 对应的监听端口,如果peer中没有则忽略
-                peer_port = next((info.port for info, _ in self.cattorrent_protocol.peers.values() if info.ip == peer_ip), 114514)
-                if peer_port == 114514:
+                peer_port = next((info.port for info, _ in self.cattorrent_protocol.peers.values() if info.ip == peer_ip), None)
+                if peer_port is None:
+                    conn.close()
                     continue
                 # 不知道有什么用，但是感觉加一个timeout比较好，防止某些异常情况导致线程一直阻塞在recv上
                 conn.settimeout(0.1)
@@ -203,10 +204,14 @@ class TcpRecvWorker(threading.Thread):
         self.stop_event = threading.Event()
         self.socket = socket
 
+    def get_peer_key(self):
+        ip = self.socket.getpeername()[0]
+        return next(((info.ip, info.port) for info, _ in self.cattorrent_protocol.peers.values() if info.ip == ip), None)
+    
     def handle_list_response(self, packet):
-        file_count = struct.unpack('!H', packet[:2])[0]
+        file_count = struct.unpack('!I', packet[:4])[0]
         files = []
-        offset = 2
+        offset = 4
         for _ in range(file_count):
             filename_length = struct.unpack('!H', packet[offset:offset+2])[0]
             offset += 2
@@ -228,9 +233,8 @@ class TcpRecvWorker(threading.Thread):
                 if not data_length_bytes:
                     # 连接被对方关闭了，这里还需要停止掉对应的tcp_sender_worker，并从tcp_connections里删除这个连接
                     self.stop()
-                    ip = self.socket.getpeername()[0]
-                    peer_key = [(info.ip, info.port) for info, _ in self.cattorrent_protocol.peers.values() if info.ip == ip][0]
-                    if peer_key:
+                    peer_key = self.get_peer_key()
+                    if peer_key and peer_key in self.cattorrent_protocol.tcp_connections:
                         self.cattorrent_protocol.tcp_connections[peer_key].stop()
                         del self.cattorrent_protocol.tcp_connections[peer_key]
                     return
@@ -246,7 +250,9 @@ class TcpRecvWorker(threading.Thread):
                     continue
             command = struct.unpack('!4s', data[:4])[0].decode()
             if command == 'LIST':
-                self.cattorrent_protocol.tcp_connections[(self.socket.getpeername())].queue.put({'command': 'RESPONSE_LIST'})
+                peer_key = self.get_peer_key()
+                if peer_key and peer_key in self.cattorrent_protocol.tcp_connections:
+                    self.cattorrent_protocol.tcp_connections[peer_key].queue.put({'command': 'RESPONSE_LIST'})
             if command == 'RLST':
                 files = self.handle_list_response(data[4:])
                 print("\nReceived file list:")
@@ -282,7 +288,7 @@ class TcpSendWorker(threading.Thread):
                 filename_length = len(filename_bytes)
                 file_content += struct.pack('!H', filename_length) + filename_bytes + struct.pack('!Q', filesize)
         
-        return struct.pack('!I4sH', 4 + 2 + len(file_content), b'RLST', file_count) + file_content
+        return struct.pack('!I4sI', 4 + 4 + len(file_content), b'RLST', file_count) + file_content
 
     def run(self) -> None:
         task = None
