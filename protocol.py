@@ -53,7 +53,7 @@ class CattorrentProtocol:
             print(f"Failed to connect to peer {peer_id} at {peer_info.ip}:{peer_info.port}: {e}")
             return
         # 统一使用对方的监听端口作为key
-        self.tcp_connections[sock.getpeername()] = handler
+        self.tcp_connections[(peer_info.ip, peer_info.port)] = handler
         handler.start()
         handler.queue.put({'command': 'LIST'})
         recv_handler = TcpRecvWorker(self, sock)
