@@ -27,23 +27,34 @@ class CattorrentProtocol:
 
     def meta(self, filename):
         """
-        返回(bitmap位数, 尾块大小,整文件hash)
+        通过本地已有的文件,生成对应的meta信息,名为.filename.meta
         """
         filepath = Path(self.share_folder) / filename
-        if not filepath.exists:
+        if not filepath.exists():
             print(f"{filename} doesn't exist.")
             return
         filesize = filepath.stat().st_size
-        chunk = ""
-        hash_result = hashlib.shake_256()
-        with open(filepath, "b") as f:
-            while chunk := iter(lambda: f.read(8192), b""):
+        hash_result = hashlib.sha256()
+        with open(filepath, "br") as f:
+            for chunk in iter(lambda: f.read(8192), b""):
                 hash_result.update(chunk)
-        return (
-            (filesize + self.slice_size - 1) // self.slice_size,
-            filesize % self.self.slice_size,
-            hash_result.digest(),
-        )
+        # return (
+        #     (filesize + self.slice_size - 1) // self.slice_size,
+        #     filesize % self.slice_size,
+        #     hash_result.hexdigest(),
+        #     )
+        bitmap = BitMap(filesize, self.slice_size)
+        bitmap.fill_all()
+        meta_content = struct.pack(f'!QLL32sL{len(bitmap.bitmap)}s',
+                                    filesize, 
+                                    self.slice_size,
+                                    bitmap.total_slices,
+                                    hash_result.digest(),
+                                    len(bitmap.bitmap),
+                                    bitmap.bitmap
+                                    )
+        with open(Path(self.share_folder) / f'.{filename}.meta', 'wb') as f:
+            f.write(meta_content)
 
     def online(self):
         self.start_protocol_upd_handler()
@@ -141,14 +152,6 @@ class CattorrentProtocol:
         self.refresh_peers()
         return next((info.ip for info, _ in self.peers.values() if info.ip == ip), None)
 
-
-@dataclass
-class PeerInfo:
-    ip: str
-    port: int
-    version: int
-
-
 class UdpBroadcastWorker(threading.Thread):
     def __init__(self, cattorrent_protocol: CattorrentProtocol):
         super().__init__()
@@ -199,7 +202,6 @@ class UdpBroadcastWorker(threading.Thread):
                 print(f"UDP Broadcast Worker error: {e}")
                 return
 
-
 # 更确切叫TcpListenWorker，因为它只负责监听和接受TCP连接，真正的发送和接收数据的工作由TcpSendWorker来做
 class TcpListenWorker(threading.Thread):
     def __init__(self, cattorrent_protocol: CattorrentProtocol):
@@ -242,3 +244,64 @@ class TcpListenWorker(threading.Thread):
         for handler in self.cattorrent_protocol.tcp_connections.values():
             handler.stop()
         self.stop_event.set()
+
+@dataclass
+class PeerInfo:
+    ip: str
+    port: int
+    version: int
+
+class BitMap:
+    def __init__(self, filesize, slice_size=256 * 1024):
+        self.total_slices = (filesize + slice_size - 1) // slice_size
+        self.bitmap = bytearray((self.total_slices + 7) // 8)
+        # self.tail_size = filesize % slice_size if filesize % slice_size != 0 else slice_size
+
+    def set_slice(self, index):
+        if index < 0 or index >= self.total_slices:
+            raise IndexError("Slice index out of range")
+        byte_index = index // 8
+        bit_index = index % 8
+        self.bitmap[byte_index] |= (1 << (7 - bit_index))
+
+    def has_slice(self, index):
+        if index < 0 or index >= self.total_slices:
+            raise IndexError("Slice index out of range")
+        byte_index = index // 8
+        bit_index = index % 8
+        return (self.bitmap[byte_index] & (1 << (7 - bit_index))) != 0
+
+    def fill_all(self):
+        for i in range(len(self.bitmap)):
+            self.bitmap[i] = 0xFF
+
+class MetaInfo:
+    def __init__(self):
+        self.filesize = None
+        self.slice_size = None
+        self.total_slices = None
+        self.file_hash = None
+        self.bitmap = None
+
+    def from_file(self, filepath, slice_size=256 * 1024):
+        """
+        从本地的.{filename}.meta文件中读取meta信息
+        """    
+        with open(filepath, 'rb') as f:
+            content = f.read()
+        self.filesize, self.slice_size, self.total_slices, file_hash, bitmap_length = struct.unpack(f'!QLL32sL', content[:48])
+        self.file_hash = file_hash.hex()
+        bitmap_data = content[48:48+bitmap_length]
+        self.bitmap = BitMap(self.filesize, self.slice_size)
+        self.bitmap.bitmap = bytearray(bitmap_data)
+    
+    def from_tcp(self, tcp_recv_worker):
+        """
+        从TCP连接中读取meta信息
+        """
+        header = tcp_recv_worker.recv_exact(48)
+        self.filesize, self.slice_size, self.total_slices, file_hash, bitmap_length = struct.unpack(f'!QLL32sL', header)
+        self.file_hash = file_hash.hex()
+        bitmap_data = tcp_recv_worker.recv_exact(bitmap_length)
+        self.bitmap = BitMap(self.filesize, self.slice_size)
+        self.bitmap.bitmap = bytearray(bitmap_data)

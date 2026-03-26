@@ -1,6 +1,6 @@
 from protocol import CattorrentProtocol, UdpBroadcastWorker
 import uuid
-
+import pathlib
 
 class ClientStatus:
     def __init__(self):
@@ -35,10 +35,13 @@ class ClientStatus:
             return
         self.cattorrent_protocol.get_peer_list(peer_id)
 
-    # 计算share文件夹下的filename的hash值，并将其写入filename.meta中
+    # 计算share文件夹下的filename的hash值，并将其写入.filename.meta中
     def meta(self, filename):
-        self.cattorrent_protocol.meta(filename)
-        # TODO
+        result = self.cattorrent_protocol.meta(filename)
+        if result:
+            print(f"Metafile for {filename} has been regenerated, containing slice count: {slice_count}, last slice size: {last_slice_size}, and file hash: {file_hash}.")
+        
+         
 
     def file(self, dst, filename):
         pass
@@ -67,6 +70,8 @@ def main():
                 client.peer()
             case ["list", peer_id]:
                 client.list(peer_id)
+            case ["meta", filename]:
+                client.meta(filename)
             case ["file", dst, filename]:
                 client.file(dst, filename)
             case _:

@@ -34,6 +34,15 @@ class TcpRecvWorker(threading.Thread):
             files.append((filename, filesize))
         return files
     
+    def recv_exact(self, n):
+        data = bytearray()
+        while len(data) < n:
+            chunk = self.socket.recv(n - len(data))
+            if not chunk:
+                raise ConnectionError("Connection closed before receiving enough data")
+            data += chunk
+        return bytes(data)
+    
     def stop(self):
         self.stop_event.set()
 
@@ -70,3 +79,19 @@ class TcpRecvWorker(threading.Thread):
                 print("\nReceived file list:")
                 for filename, filesize in files:
                     print(f"{filename} ({filesize} bytes)")
+            if command == 'META':
+                filename_length = struct.unpack('!H', data[4:6])[0]
+                filename = data[6:6+filename_length].decode()
+                peer_key = self.get_peer_key()
+                if peer_key and peer_key in self.cattorrent_protocol.tcp_connections:
+                    self.cattorrent_protocol.tcp_connections[peer_key].queue.put({'command': 'RESPONSE_META', 'filename': filename})
+            if command == 'RMTA':
+                meta_content = data[4:]
+                # 还没想好怎么处理，先写入到share文件夹里，命名为.peer_ip.filename.meta
+                peer_ip = self.socket.getpeername()[0]
+                filename = meta_content[2:2+struct.unpack('!H', meta_content[:2])[0]].decode()
+                meta_filepath = Path(self.cattorrent_protocol.share_folder) / f'.{peer_ip}.{filename}.meta'
+                with open(meta_filepath, 'wb') as f:
+                    f.write(meta_content)
+                print(f"\nReceived meta for {filename} from {peer_ip}, saved to {meta_filepath}")
+                

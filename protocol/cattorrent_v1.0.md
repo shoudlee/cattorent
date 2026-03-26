@@ -78,21 +78,16 @@ bytes  filename
 - file_hash = **文件内容 SHA-256**
 - piece_hash → 后期再加（否则 META 会爆）
 
-**Commnad：META**
+**Commnad：RMTA**
 **Body：**
 
 ```
 uint64 file_size
-uint32 piece_size         # 固定 256KB 也可以写死，但建议返回
-uint32 piece_count
-
+uint32 slice_size         # 固定 256KB 也可以写死，但建议返回
+uint32 slice_count
 bytes[32] file_hash       # SHA-256
-
 uint32 bitmap_bytes_len
 bytes    bitmap           # ceil(piece_count / 8)
-
-# （先不做，后面再加）
-# bytes[32] piece_hash * piece_count
 ```
 
 ## **5. 获取 piece**
