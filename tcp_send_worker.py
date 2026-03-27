@@ -69,7 +69,7 @@ class TcpSendWorker(threading.Thread):
                     task = None
                 elif task['command'] == 'META':
                     filename = task['filename'].encode()
-                    msg = struct.pack('!I4sH', 4 + 4 + 2 + len(filename), b'META', len(filename)) + filename.encode()
+                    msg = struct.pack('!I4sH', 4 + 4 + 2 + len(filename), b'META', len(filename)) + filename
                     self.socket.sendall(msg)
                     task = None
                 elif task['command'] == 'RESPONSE_META':
