@@ -81,6 +81,7 @@ class TcpRecvWorker(threading.Thread):
             elif command == 'META':
                 filename_length = struct.unpack('!H', data[4:6])[0]
                 filename = data[6:6+filename_length].decode()
+                print(f"Received META request for {filename}")
                 peer_key = self.get_peer_key()
                 if peer_key and peer_key in self.cattorrent_protocol.tcp_connections:
                     self.cattorrent_protocol.tcp_connections[peer_key].queue.put({'command': 'RESPONSE_META', 'filename': filename})

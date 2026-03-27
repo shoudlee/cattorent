@@ -49,7 +49,7 @@ class TcpSendWorker(threading.Thread):
         if filepath.exists() and meta_filepath.exists():
             with open(meta_filepath, 'rb') as f:
                 meta_content = f.read()
-            return struct.pack('!I4s', 4 + 4 + len(meta_content), b'RMTA') + meta_content
+            return struct.pack('!I4s', 4 + len(meta_content), b'RMTA') + meta_content
 
     def run(self) -> None:
         """
@@ -72,7 +72,7 @@ class TcpSendWorker(threading.Thread):
                 elif task['command'] == 'META':
                     self.cattorrent_protocol.pending_meta_filename = task['filename']
                     filename = task['filename'].encode()
-                    msg = struct.pack('!I4sH', 4 + 4 + 2 + len(filename), b'META', len(filename)) + filename
+                    msg = struct.pack('!I4sH', 4 + 2 + len(filename), b'META', len(filename)) + filename
                     self.socket.sendall(msg)
                     task = None
                 elif task['command'] == 'RESPONSE_META':

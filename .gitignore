@@ -8,4 +8,4 @@ __pycache__/
 *.bak
 *.swp
 .DS_Store
-catshare
+catshare/
