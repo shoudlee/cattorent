@@ -42,6 +42,7 @@ class TcpSendWorker(threading.Thread):
         return struct.pack('!I4sI', 4 + 4 + len(file_content), b'RLST', file_count) + file_content
     
     def handle_meta_request(self, filename):
+        print("handle_meta_request")
         filepath = Path(self.cattorrent_protocol.share_folder) / filename
         meta_filepath = Path(self.cattorrent_protocol.share_folder) / f'.{filename}.meta'
         if filepath.exists() and meta_filepath.exists():

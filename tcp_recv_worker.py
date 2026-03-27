@@ -88,10 +88,16 @@ class TcpRecvWorker(threading.Thread):
             if command == 'RMTA':
                 meta_content = data[4:]
                 # 还没想好怎么处理，先写入到share文件夹里，命名为.peer_ip.filename.meta
+                meta_filesize = struct.unpack('!Q', meta_content[0:8])[0]
+                meta_fileslice_size = struct.unpack("!I", meta_content[8:12])[0]
+                meta_fileslice_count = struct.unpack("!I", meta_content[12:16])[0]
+                meta_file_hash = meta_content[16:48].hex()
+                meta_bitmap_length = struct.unpack("!I", meta_content[48:52])[0]
+                meta_bitmap = meta_content[52:52+meta_bitmap_length]
+
                 peer_ip = self.socket.getpeername()[0]
-                filename = meta_content[2:2+struct.unpack('!H', meta_content[:2])[0]].decode()
-                meta_filepath = Path(self.cattorrent_protocol.share_folder) / f'.{peer_ip}.{filename}.meta'
-                with open(meta_filepath, 'wb') as f:
+                meta_filename = f'.{filename}.meta'
+                with open(Path(self.cattorrent_protocol.share_folder) / meta_filename, 'wb') as f:
                     f.write(meta_content)
-                print(f"\nReceived meta for {filename} from {peer_ip}, saved to {meta_filepath}")
+                print(f"\nReceived meta for {filename} from {peer_ip}")
                 
