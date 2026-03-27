@@ -39,9 +39,20 @@ class ClientStatus:
     def meta(self, filename):
         result = self.cattorrent_protocol.meta(filename)
         if result:
-            print(f"Metafile for {filename} has been regenerated, containing slice count: {slice_count}, last slice size: {last_slice_size}, and file hash: {file_hash}.")
+            print(f"Metafile for {filename} has been regenerated.")
+    
+    # 测试用，检测是否能正确处理meta file的收发流程
+    def get_meta(self, peer_id, filename):
+        peer_id = uuid.UUID(peer_id)
+        if peer_id in self.cattorrent_protocol.peers:
+            peer_ip = self.cattorrent_protocol.peers[peer_id][0].ip
+            if peer_ip in self.cattorrent_protocol.tcp_connections:
+                self.cattorrent_protocol.tcp_connections[peer_ip].queue.put({'command':'META', 'filename':filename})
+            else:
+                print(f"No TCP connection found for peer {peer_id} with IP {peer_ip}.")
+        else:
+            print(f"Peer {peer_id} not found.")
         
-         
 
     def file(self, dst, filename):
         pass
@@ -72,6 +83,9 @@ def main():
                 client.list(peer_id)
             case ["meta", filename]:
                 client.meta(filename)
+            # 测试用
+            case ['meta', peer_id, filename]:
+                client.get_meta(peer_id, filename)
             case ["file", dst, filename]:
                 client.file(dst, filename)
             case _:
