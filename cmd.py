@@ -43,15 +43,12 @@ class ClientStatus:
     
     # 测试用，检测是否能正确处理meta file的收发流程
     def get_meta(self, peer_id, filename):
-        peer_id = uuid.UUID(peer_id)
-        if peer_id in self.cattorrent_protocol.peers:
-            peer_ip = self.cattorrent_protocol.peers[peer_id][0].ip
-            if peer_ip in self.cattorrent_protocol.tcp_connections:
-                self.cattorrent_protocol.tcp_connections[peer_ip].queue.put({'command':'META', 'filename':filename})
-            else:
-                print(f"No TCP connection found for peer {peer_id} with IP {peer_ip}.")
-        else:
-            print(f"Peer {peer_id} not found.")
+        try:
+            peer_id = uuid.UUID(peer_id)
+        except ValueError:
+            print("Invalid peer ID format. Please provide a valid UUID.")
+            return
+        self.cattorrent_protocol.get_peer_meta(peer_id, filename)
         
 
     def file(self, dst, filename):

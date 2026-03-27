@@ -26,6 +26,45 @@ class CattorrentProtocol:
         self.slice_size = 256 * 1024
         self.pending_meta_filename = None
 
+    def cleanup_connection(self, peer_ip):
+        handler = self.tcp_connections.pop(peer_ip, None)
+        if handler is None:
+            return
+        handler.stop()
+        try:
+            handler.socket.close()
+        except OSError:
+            pass
+
+    def ensure_tcp_connection(self, peer_id):
+        self.refresh_peers()
+        if peer_id not in self.peers:
+            print(f"Peer {peer_id} not found.")
+            return None
+        peer_info = self.peers[peer_id][0]
+        handler = self.tcp_connections.get(peer_info.ip)
+        if handler is not None:
+            if handler.is_alive():
+                return handler
+            self.cleanup_connection(peer_info.ip)
+
+        try:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.settimeout(2)
+            sock.connect((peer_info.ip, peer_info.port))
+            sock.settimeout(0.1)
+            handler = TcpSendWorker(self, sock)
+        except Exception as e:
+            print(
+                f"Failed to connect to peer {peer_id} at {peer_info.ip}:{peer_info.port}: {e}"
+            )
+            return None
+
+        self.tcp_connections[peer_info.ip] = handler
+        handler.start()
+        TcpRecvWorker(self, sock).start()
+        return handler
+
     def meta(self, filename):
         """
         通过本地已有的文件,生成对应的meta信息,名为.filename.meta
@@ -71,34 +110,16 @@ class CattorrentProtocol:
         self.tcp_recv_handler.start()
 
     def get_peer_list(self, peer_id) -> None:
-        # 是否在peers里
-        self.refresh_peers()
-        if peer_id not in self.peers:
-            print(f"Peer {peer_id} not found.")
+        handler = self.ensure_tcp_connection(peer_id)
+        if handler is None:
             return
-        peer_info = self.peers[peer_id][0]
-
-        # 是否已经建立了TCP连接
-        if handler := self.tcp_connections.get(peer_info.ip):
-            handler.queue.put({"command": "LIST"})
-            return
-
-        # 没有TCP连接，建立一个新的连接并放入tcp_connections
-        try:
-            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            sock.connect((peer_info.ip, peer_info.port))
-            handler = TcpSendWorker(self, sock)
-        except Exception as e:
-            print(
-                f"Failed to connect to peer {peer_id} at {peer_info.ip}:{peer_info.port}: {e}"
-            )
-            return
-        # 统一使用对方的监听端口作为key
-        self.tcp_connections[peer_info.ip] = handler
-        handler.start()
         handler.queue.put({"command": "LIST"})
-        recv_handler = TcpRecvWorker(self, sock)
-        recv_handler.start()
+
+    def get_peer_meta(self, peer_id, filename):
+        handler = self.ensure_tcp_connection(peer_id)
+        if handler is None:
+            return
+        handler.queue.put({"command": "META", "filename": filename})
 
     def encode_broadcast_message(self, command="ONLI"):
         reserved = 0
@@ -230,6 +251,7 @@ class TcpListenWorker(threading.Thread):
                     continue
                 # 不知道有什么用，但是感觉加一个timeout比较好，防止某些异常情况导致线程一直阻塞在recv上
                 conn.settimeout(0.1)
+                self.cattorrent_protocol.cleanup_connection(peer_key)
                 send_worker = TcpSendWorker(self.cattorrent_protocol, conn)
                 self.cattorrent_protocol.tcp_connections[peer_key] = send_worker
                 send_worker.start()
@@ -242,8 +264,8 @@ class TcpListenWorker(threading.Thread):
                 return
 
     def stop(self):
-        for handler in self.cattorrent_protocol.tcp_connections.values():
-            handler.stop()
+        for peer_ip in list(self.cattorrent_protocol.tcp_connections):
+            self.cattorrent_protocol.cleanup_connection(peer_ip)
         self.stop_event.set()
 
 @dataclass

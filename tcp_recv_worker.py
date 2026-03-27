@@ -46,59 +46,49 @@ class TcpRecvWorker(threading.Thread):
     def stop(self):
         self.stop_event.set()
 
+    def cleanup_connection(self):
+        peer_key = self.get_peer_key()
+        if peer_key:
+            self.cattorrent_protocol.cleanup_connection(peer_key)
+
     def run(self) -> None:
         while not self.stop_event.is_set():
-            # 处理收到的消息
             try:
-                data_length_bytes = self.socket.recv(4)
-                if not data_length_bytes:
-                    # 连接被对方关闭了，这里还需要停止掉对应的tcp_sender_worker，并从tcp_connections里删除这个连接
-                    self.stop()
-                    peer_key = self.get_peer_key()
-                    if peer_key and peer_key in self.cattorrent_protocol.tcp_connections:
-                        self.cattorrent_protocol.tcp_connections[peer_key].stop()
-                        del self.cattorrent_protocol.tcp_connections[peer_key]
-                    return
-                data_length = struct.unpack('!I', data_length_bytes)[0]
-            except socket.timeout: 
+                data_length = struct.unpack('!I', self.recv_exact(4))[0]
+                data = self.recv_exact(data_length)
+            except socket.timeout:
                 continue
-            data = bytes()
-            while len(data) < data_length:
-                try:
-                    chunk = self.socket.recv(data_length - len(data))
-                    data += chunk
-                except socket.timeout:
-                    continue
+            except (ConnectionError, OSError):
+                self.stop()
+                self.cleanup_connection()
+                return
             command = struct.unpack('!4s', data[:4])[0].decode()
             if command == 'LIST':
                 peer_key = self.get_peer_key()
                 if peer_key and peer_key in self.cattorrent_protocol.tcp_connections:
                     self.cattorrent_protocol.tcp_connections[peer_key].queue.put({'command': 'RESPONSE_LIST'})
-            if command == 'RLST':
+            elif command == 'RLST':
                 files = self.handle_list_response(data[4:])
                 print("\nReceived file list:")
                 for filename, filesize in files:
                     print(f"{filename} ({filesize} bytes)")
-            if command == 'META':
+            elif command == 'META':
                 filename_length = struct.unpack('!H', data[4:6])[0]
                 filename = data[6:6+filename_length].decode()
                 peer_key = self.get_peer_key()
                 if peer_key and peer_key in self.cattorrent_protocol.tcp_connections:
                     self.cattorrent_protocol.tcp_connections[peer_key].queue.put({'command': 'RESPONSE_META', 'filename': filename})
-            if command == 'RMTA':
+            elif command == 'RMTA':
                 meta_content = data[4:]
-                # 还没想好怎么处理，先写入到share文件夹里，命名为.peer_ip.filename.meta
-                meta_filesize = struct.unpack('!Q', meta_content[0:8])[0]
-                meta_fileslice_size = struct.unpack("!I", meta_content[8:12])[0]
-                meta_fileslice_count = struct.unpack("!I", meta_content[12:16])[0]
-                meta_file_hash = meta_content[16:48].hex()
                 meta_bitmap_length = struct.unpack("!I", meta_content[48:52])[0]
-                meta_bitmap = meta_content[52:52+meta_bitmap_length]
+                if len(meta_content) < 52 + meta_bitmap_length:
+                    print("Received invalid meta payload.")
+                    continue
 
                 peer_ip = self.socket.getpeername()[0]
                 if self.cattorrent_protocol.pending_meta_filename:
                     filename = self.cattorrent_protocol.pending_meta_filename
-                    self.cattorrent_protocol.pending_meta_filename = None 
+                    self.cattorrent_protocol.pending_meta_filename = None
                     meta_filename = f'.{filename}.meta'
                     with open(Path(self.cattorrent_protocol.share_folder) / meta_filename, 'wb') as f:
                         f.write(meta_content)
