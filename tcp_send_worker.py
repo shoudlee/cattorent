@@ -84,4 +84,7 @@ class TcpSendWorker(threading.Thread):
             # 防止sendall超时，保留现存的任务继续尝试发送
             except socket.timeout:
                 continue
+            except Exception as e:
+                print(f"TcpSendWorker error: {e}, task={task}")
+                task = None
    

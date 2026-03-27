@@ -16,7 +16,7 @@ class TcpRecvWorker(threading.Thread):
 
     def get_peer_key(self):
         try:
-            return self.cattorrent_protocol.get_peer_key_by_ip(self.socket.getpeername()[0])
+            return self.socket.getpeername()[0]
         except OSError:
             return None
     
@@ -47,7 +47,10 @@ class TcpRecvWorker(threading.Thread):
         self.stop_event.set()
 
     def cleanup_connection(self):
-        peer_key = self.get_peer_key()
+        try:
+            peer_key = self.socket.getpeername()[0]
+        except OSError:
+            peer_key = None
         if peer_key:
             self.cattorrent_protocol.cleanup_connection(peer_key)
 
@@ -62,6 +65,9 @@ class TcpRecvWorker(threading.Thread):
                 self.stop()
                 self.cleanup_connection()
                 return
+            except Exception as e:
+                print(f"TcpRecvWorker parse error: {e}")
+                continue
             command = struct.unpack('!4s', data[:4])[0].decode()
             if command == 'LIST':
                 peer_key = self.get_peer_key()

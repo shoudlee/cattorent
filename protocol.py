@@ -113,12 +113,14 @@ class CattorrentProtocol:
         handler = self.ensure_tcp_connection(peer_id)
         if handler is None:
             return
+        print(f"Sending LIST to peer {peer_id}")
         handler.queue.put({"command": "LIST"})
 
     def get_peer_meta(self, peer_id, filename):
         handler = self.ensure_tcp_connection(peer_id)
         if handler is None:
             return
+        print(f"Requesting META {filename} from peer {peer_id}")
         handler.queue.put({"command": "META", "filename": filename})
 
     def encode_broadcast_message(self, command="ONLI"):
@@ -244,11 +246,7 @@ class TcpListenWorker(threading.Thread):
         while not self.stop_event.is_set():
             try:
                 conn, addr = self.recv_socket.accept()
-                peer_key = self.cattorrent_protocol.get_peer_key_by_ip(addr[0])
-                if peer_key is None:
-                    print("??????????")
-                    conn.close()
-                    continue
+                peer_key = addr[0]
                 # 不知道有什么用，但是感觉加一个timeout比较好，防止某些异常情况导致线程一直阻塞在recv上
                 conn.settimeout(0.1)
                 self.cattorrent_protocol.cleanup_connection(peer_key)
