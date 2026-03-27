@@ -96,8 +96,12 @@ class TcpRecvWorker(threading.Thread):
                 meta_bitmap = meta_content[52:52+meta_bitmap_length]
 
                 peer_ip = self.socket.getpeername()[0]
-                meta_filename = f'.{filename}.meta'
-                with open(Path(self.cattorrent_protocol.share_folder) / meta_filename, 'wb') as f:
-                    f.write(meta_content)
-                print(f"\nReceived meta for {filename} from {peer_ip}")
-                
+                if self.cattorrent_protocol.pending_meta_filename:
+                    filename = self.cattorrent_protocol.pending_meta_filename
+                    self.cattorrent_protocol.pending_meta_filename = None 
+                    meta_filename = f'.{filename}.meta'
+                    with open(Path(self.cattorrent_protocol.share_folder) / meta_filename, 'wb') as f:
+                        f.write(meta_content)
+                    print(f"\nReceived meta for {filename} from {peer_ip}")
+                else:
+                    print(f"\nReceived meta from {peer_ip} but no pending filename, ignoring")

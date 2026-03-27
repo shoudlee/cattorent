@@ -17,6 +17,7 @@ class TcpSendWorker(threading.Thread):
         # 后期改为select或epoll来处理多个连接，现在先简单地把它设置为非阻塞，并在recv时捕获BlockingIOError异常
         self.socket = socket
         # self.socket.settimeout(0.1)
+        self.pending_meta_filename = None
     
     def stop(self):
         self.stop_event.set()
@@ -69,6 +70,7 @@ class TcpSendWorker(threading.Thread):
                     self.socket.sendall(msg)
                     task = None
                 elif task['command'] == 'META':
+                    self.cattorrent_protocol.pending_meta_filename = task['filename']
                     filename = task['filename'].encode()
                     msg = struct.pack('!I4sH', 4 + 4 + 2 + len(filename), b'META', len(filename)) + filename
                     self.socket.sendall(msg)

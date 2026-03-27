@@ -88,6 +88,7 @@ uint32 slice_count
 bytes[32] file_hash       # SHA-256
 uint32 bitmap_bytes_len
 bytes    bitmap           # ceil(piece_count / 8)
+uint32 filename_size
 ```
 
 ## **5. 获取 piece**

@@ -24,6 +24,7 @@ class CattorrentProtocol:
         self.share_folder = share_folder
         # 256KB
         self.slice_size = 256 * 1024
+        self.pending_meta_filename = None
 
     def meta(self, filename):
         """
