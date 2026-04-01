@@ -20,10 +20,16 @@ class CattorrentProtocol:
     """
 
     def __init__(
-        self, ip="0.0.0.0", port=9822, broadcast_interval=2, share_folder="./catshare"
+        self,
+        ip="0.0.0.0",
+        port=9822,
+        data_port=9823,
+        broadcast_interval=2,
+        share_folder="./catshare",
     ):
         self.ip = ip
         self.port = port
+        self.data_port = data_port
         self.broadcast_interval = broadcast_interval
         self.peer_id = uuid.uuid4()
         self.peers: dict[uuid.UUID, tuple[PeerInfo, float]] = {}
@@ -39,7 +45,9 @@ class CattorrentProtocol:
             on_file_list=self._on_file_list,
             on_meta_received=self._on_meta_received,
         )
-        self.connection_manager = ConnectionManager(callbacks=callbacks, port=self.port)
+        self.connection_manager = ConnectionManager(
+            callbacks=callbacks, port=self.port, data_port=self.data_port
+        )
 
         self.upd_handler: UdpBroadcastWorker | None = None
         self.tcp_recv_handler: TcpListenWorker | None = None
@@ -126,14 +134,14 @@ class CattorrentProtocol:
         self.tcp_recv_handler.start()
 
     def get_peer_list(self, peer_id) -> None:
-        handler = self.ensure_tcp_connection(peer_id)
+        handler = self.get_peer(peer_id)
         if handler is None:
             return
         print(f"Sending LIST to peer {peer_id}")
         handler.request_list()
 
     def get_peer_meta(self, peer_id, filename):
-        handler = self.ensure_tcp_connection(peer_id)
+        handler = self.get_peer(peer_id)
         if handler is None:
             return
         print(f"Requesting META {filename} from peer {peer_id}")
@@ -168,6 +176,8 @@ class CattorrentProtocol:
             peer_info = PeerInfo(ip=ip, port=adv_port, version=protocol_version)
             peer_id = uuid.UUID(bytes=peer_id_bytes)
             self.peers[peer_id] = (peer_info, time.time())
+            self.connection_manager.get_control_handler(ip=ip)
+
         except Exception as e:
             print(f"Failed to handle received UDP packet: {e}")
 
@@ -275,6 +285,52 @@ class TcpListenWorker(threading.Thread):
                 return
             except Exception as e:
                 print(f"TCP Listen Worker error: {e}")
+                return
+
+    def stop(self):
+        self.stop_event.set()
+        self.cattorrent_protocol.connection_manager.stop_all()
+        if self.recv_socket:
+            try:
+                self.recv_socket.close()
+            except OSError:
+                pass
+
+
+class TcpDataListenWorker(threading.Thread):
+    """
+    用于监听data端口的连接
+    """
+
+    def __init__(self, cattorrent_protocol: CattorrentProtocol):
+        super().__init__(daemon=True)
+        self.cattorrent_protocol = cattorrent_protocol
+        self.stop_event = threading.Event()
+        self.recv_socket: socket.socket | None = None
+
+    def setup_socket(self):
+        self.recv_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.recv_socket.bind(
+            (self.cattorrent_protocol.ip, self.cattorrent_protocol.data_port)
+        )
+        self.recv_socket.listen()
+        self.recv_socket.settimeout(0.5)
+
+    def run(self) -> None:
+        self.setup_socket()
+        while not self.stop_event.is_set():
+            try:
+                assert self.recv_socket is not None
+                conn, addr = self.recv_socket.accept()
+                self.cattorrent_protocol.connection_manager.register_accepted_data_connection(
+                    addr[0], conn
+                )
+            except socket.timeout:
+                continue
+            except OSError:
+                return
+            except Exception as e:
+                print(f"TCP Data Listen Worker error: {e}")
                 return
 
     def stop(self):

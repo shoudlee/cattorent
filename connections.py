@@ -11,11 +11,10 @@ logger = get_logger(__name__)
 class ConnectionManager:
     """
     Attributes:
-        connection_handlers (dict): {  peer_ip(str):(control_connection_handler(ControlConnectionHandler),
-          data_connection_handler(DataConnectionHandler)) }
+        connection_handlers (dict): {  peer_ip(str):(control_connection_handler(ControlConnectionHandler) }
     """
 
-    def __init__(self, callbacks: ConnectionHandlerCallbacks, port=9822) -> None:
+    def __init__(self, callbacks: ConnectionHandlerCallbacks, port, data_port) -> None:
         """
         初始化connection_handlers为空字典，
         port为TCP连接使用的端口号，默认为9822
@@ -23,6 +22,7 @@ class ConnectionManager:
         self.connection_handlers = {}
         self.callbacks = callbacks
         self.port = port
+        self.data_port = data_port
         self._lock = threading.Lock()
 
     def cleanup_connection(self, ip):
@@ -65,7 +65,7 @@ class ConnectionManager:
         return handler
 
     def register_accepted_connection(self, ip: str, sock: socket.socket):
-        """Create a handler for an accepted inbound TCP connection.这里不用socket.getpeername()是因为以前涉及到多个客户端端口"""
+        """Create a control handler for an accepted inbound TCP connection.这里不用socket.getpeername()是因为以前涉及到多个客户端端口"""
         sock.settimeout(0.1)
         self.cleanup_connection(ip)
         handler = ControlConnectionHandler(self, sock, self.callbacks)

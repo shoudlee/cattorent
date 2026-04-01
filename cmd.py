@@ -6,6 +6,7 @@ import pathlib
 
 logger = get_logger(__name__)
 
+
 class Client:
     def __init__(self):
         self.online_status = False
@@ -23,7 +24,7 @@ class Client:
             logger.warning("Client is offline. Please go online first.")
             return
         else:
-            logger.info("Peers: %s", self.cattorrent_protocol.get_peers())
+            print(self.cattorrent_protocol.peers)
 
     def list(self, peer_id):
         if not self.online_status:
@@ -46,7 +47,7 @@ class Client:
         result = self.cattorrent_protocol.meta(filename)
         if result:
             logger.info("Metafile for %s has been regenerated.", filename)
-    
+
     def get_meta(self, peer_id, filename):
         """
         测试用，检测是否能正确处理meta file的收发流程
@@ -57,7 +58,7 @@ class Client:
             logger.warning("Invalid peer ID format. Please provide a valid UUID.")
             return
         self.cattorrent_protocol.get_peer_meta(peer_id, filename)
-        
+
     def exit(self):
         # 退出时按监听线程、广播线程的顺序收尾，避免后台线程残留。
         if self.cattorrent_protocol.upd_handler is not None:
@@ -68,6 +69,7 @@ class Client:
             self.cattorrent_protocol.tcp_recv_handler.join()  # 等待TCP监听线程结束
 
     def file(self, dst, filename):
+        """ """
         pass
 
 
@@ -94,7 +96,7 @@ def main():
             case ["meta", filename]:
                 client.meta(filename)
             # 测试用
-            case ['meta', peer_id, filename]:
+            case ["meta", peer_id, filename]:
                 client.get_meta(peer_id, filename)
             case ["file", dst, filename]:
                 client.file(dst, filename)
