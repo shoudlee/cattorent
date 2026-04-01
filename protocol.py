@@ -31,7 +31,7 @@ class CattorrentProtocol:
         self.share_folder.mkdir(parents=True, exist_ok=True)
         self.slice_size = 256 * 1024
 
-        # 与其把整个protocol层暴露给connection handler，不如通过回调的方式让connection handler访问需要的功能，
+        # 与其把整个protocol层暴露给connection handler thread，不如通过回调的方式让connection handler访问需要的功能，
         # 避免直接依赖protocol内部状态，降低耦合。
         callbacks = ConnectionHandlerCallbacks(
             list_local_files=self._list_local_files,
@@ -159,7 +159,9 @@ class CattorrentProtocol:
                 print(f"Unknown command: {command}")
                 return
 
-            adv_port, _, protocol_version, peer_id_bytes = struct.unpack("!HHI16s", packet[8:])
+            adv_port, _, protocol_version, peer_id_bytes = struct.unpack(
+                "!HHI16s", packet[8:]
+            )
             if peer_id_bytes == self.peer_id.bytes:
                 return
 
@@ -185,7 +187,10 @@ class CattorrentProtocol:
 
     def get_peer_key_by_ip(self, ip):
         self.refresh_peers()
-        return next((peer_id for peer_id, (info, _) in self.peers.items() if info.ip == ip), None)
+        return next(
+            (peer_id for peer_id, (info, _) in self.peers.items() if info.ip == ip),
+            None,
+        )
 
 
 class UdpBroadcastWorker(threading.Thread):
@@ -228,7 +233,9 @@ class UdpBroadcastWorker(threading.Thread):
                     broadcast_time = now
                     self.send_broadcast(message)
                 data, addr = self.socket.recvfrom(1024)
-                self.cattorrent_protocol.handle_received_udp_packet(addr[0], addr[1], data)
+                self.cattorrent_protocol.handle_received_udp_packet(
+                    addr[0], addr[1], data
+                )
             except socket.timeout:
                 continue
             except OSError:
@@ -247,7 +254,9 @@ class TcpListenWorker(threading.Thread):
 
     def setup_socket(self):
         self.recv_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        self.recv_socket.bind((self.cattorrent_protocol.ip, self.cattorrent_protocol.port))
+        self.recv_socket.bind(
+            (self.cattorrent_protocol.ip, self.cattorrent_protocol.port)
+        )
         self.recv_socket.listen()
         self.recv_socket.settimeout(0.5)
 
@@ -257,7 +266,9 @@ class TcpListenWorker(threading.Thread):
             try:
                 assert self.recv_socket is not None
                 conn, addr = self.recv_socket.accept()
-                self.cattorrent_protocol.connection_manager.register_accepted_connection(addr[0], conn)
+                self.cattorrent_protocol.connection_manager.register_accepted_connection(
+                    addr[0], conn
+                )
             except socket.timeout:
                 continue
             except OSError:
@@ -311,8 +322,8 @@ class MetaInfo:
     def from_file(self, filepath, slice_size=256 * 1024):
         with open(filepath, "rb") as f:
             content = f.read()
-        self.filesize, self.slice_size, self.total_slices, file_hash, bitmap_length = struct.unpack(
-            "!QLL32sL", content[:48]
+        self.filesize, self.slice_size, self.total_slices, file_hash, bitmap_length = (
+            struct.unpack("!QLL32sL", content[:48])
         )
         self.file_hash = file_hash.hex()
         bitmap_data = content[48 : 48 + bitmap_length]

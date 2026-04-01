@@ -30,6 +30,7 @@ class ConnectionHandlerCallbacks:
     on_meta_received: Callable[[str, str, bytes], None]
 
 
+# 实现为一个线程，可以防止主线程阻塞
 class ControlConnectionHandler(threading.Thread):
     def __init__(
         self,
@@ -89,6 +90,10 @@ class ControlConnectionHandler(threading.Thread):
             meta_content = self.callbacks.load_meta_content(filename)
             if meta_content is not None:
                 self.socket.sendall(build_meta_response(meta_content))
+            else:
+                logger.error(
+                    f"Meta request from {self.peer_ip}, but {filename} not Found."
+                )
 
     def _handle_incoming_frame(self) -> None:
         # 接收线程只负责按帧读取和分发，不直接做阻塞式业务处理。
@@ -112,7 +117,7 @@ class ControlConnectionHandler(threading.Thread):
 
         if command == "RMTA":
             if not is_valid_meta_payload(payload):
-                logger.warning("Received invalid meta payload from %s.", self.peer_ip)
+                logger.error("Received invalid meta payload from %s.", self.peer_ip)
                 return
             with self._pending_meta_lock:
                 filename = self.pending_meta_filename
@@ -158,7 +163,9 @@ class ControlConnectionHandler(threading.Thread):
         try:
             # handler 本身只负责托管 send/recv 两个子线程及它们的生命周期。
             self._send_thread = threading.Thread(target=self._sender_loop, daemon=True)
-            self._recv_thread = threading.Thread(target=self._receiver_loop, daemon=True)
+            self._recv_thread = threading.Thread(
+                target=self._receiver_loop, daemon=True
+            )
             self._send_thread.start()
             self._recv_thread.start()
             self._send_thread.join()
