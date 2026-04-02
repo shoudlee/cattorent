@@ -1,5 +1,6 @@
 import socket
 from logging_setup import get_logger
+import threading
 
 logger = get_logger(__name__)
 
@@ -33,3 +34,9 @@ def close_socket_quietly(sock: socket.socket | None) -> None:
         sock.close()
     except OSError as e:
         logger.debug("Socket close error (probably already closed): %s", e)
+
+
+class SimpleEventWaiter:
+    def __init__(self, *, request_id):
+        self.event = threading.Event()
+        self.id = request_id

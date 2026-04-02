@@ -3,15 +3,18 @@ import threading
 from dataclasses import dataclass
 from queue import Empty, Queue
 from typing import Callable
-
+from tcp_utils import SimpleEventWaiter
 from logging_setup import get_logger
 from protocol_codec import (
     build_list_request,
     build_list_response,
     build_meta_request,
     build_meta_response,
+    build_getp_request,
     is_valid_meta_payload,
     parse_list_response,
+    parse_getp_request,
+    parse_getp_response,
     parse_meta_request,
     unpack_frame_body,
 )
@@ -31,6 +34,9 @@ class ConnectionHandlerCallbacks:
 
 
 # 实现为一个线程，可以防止主线程阻塞
+# 为了避免出错，data socket遵循：
+# 1.先查找当前有无，没有再新建
+# 2.如果收到新的连接请求，使用新的socket,关闭当前已有的socket
 class ControlConnectionHandler(threading.Thread):
     def __init__(
         self,
@@ -51,6 +57,7 @@ class ControlConnectionHandler(threading.Thread):
         self._closed = False
         self._send_thread: threading.Thread | None = None
         self._recv_thread: threading.Thread | None = None
+        self.data_handler: threading.Thread | None = None
 
     def stop(self) -> None:
         self.stop_event.set()
@@ -176,3 +183,117 @@ class ControlConnectionHandler(threading.Thread):
             self.stop_event.set()
             self._close_socket_once()
             self.manager.unregister_connection(self.peer_ip, self)
+
+    def register_accepted_data_connection(self, ip: str, sock: socket.socket):
+        """Create a data transfer handler for an accepted inbound TCP connection.这里不用socket.getpeername()是因为以前涉及到多个客户端端口"""
+        sock.settimeout(0.1)
+        self.cleanup_connection(ip)
+        self.data_handler = DataConnectionHandler(ip, socket)
+        self.data_handler.start()
+
+
+class DataConnectionHandler:
+    def __init__(
+        self,
+        sock: socket.socket,
+    ):
+        super().__init__(daemon=True)
+        self.socket = sock
+        self.stop_event = threading.Event()
+        self._close_lock = threading.Lock()
+        self._closed = False
+        self.queue = Queue.queue()
+        self.data_request_waiters: dict[int, SimpleEventWaiter] = {}
+        self.socket_send_lock = threading.Lock()
+
+    def stop(self) -> None:
+        self.stop_event.set()
+        self._close_socket_once()
+
+    def _close_socket_once(self) -> None:
+        # send/recv 两个线程都可能触发关闭，这里保证 socket 只被实际关闭一次。
+        with self._close_lock:
+            if self._closed:
+                return
+            self._closed = True
+        close_socket_quietly(self.socket)
+
+    def _handle_outgoing_task(self, task: dict) -> None:
+        # 这里只处理发送PIEC的情况，发送GETP由download manager线程自己写socket
+        command = task.get("command")
+        if command == "PIEC":
+            filename = task["filename"]
+            piece_index = task["piece_number"]
+            file_piece = self.callbacks.on_piec_send(filename, piece_index)
+            with self.socket_send_lock:
+                self.socket.sendall(
+                    build_getp_request(filename, piece_index, file_piece)
+                )
+        else:
+            logger.error(f"Unkown command at data connection command: {command}.")
+
+    def _handle_incoming_frame(self) -> None:
+        data_length = int.from_bytes(recv_exact(self.socket, 4), "big")
+        body = recv_exact(self.socket, data_length)
+        command, payload = unpack_frame_body(body)
+        if command == "GETP":
+            # 具体处理逻辑调用移交给send_handler,不然它太闲(?)
+            filename, piece_number = parse_getp_request(payload)
+            self.queue.put(
+                {
+                    "command": "PIEC",
+                    "filename": filename,
+                    "piece_number": piece_number,
+                }
+            )
+            return
+        if command == "PIEC":
+            filename, piece_number, file_piece = parse_getp_response(payload)
+            self.callbacks.on_piec_received(
+                self.peer_ip, filename, piece_number, file_piece
+            )
+
+    def _sender_loop(self) -> None:
+        try:
+            # 同步 IO 模型下，发送单独占用一个线程，避免被 recv 阻塞影响出站请求。
+            while not self.stop_event.is_set():
+                try:
+                    task = self.queue.get(timeout=0.1)  # 这里的timeout需要用来暂停
+                except Empty:
+                    continue
+                self._handle_outgoing_task(task)
+        except (ConnectionError, OSError):
+            self.stop()
+        except Exception as exc:
+            logger.exception("Sender loop error with %s", self.peer_ip)
+            self.stop()
+
+    def _receiver_loop(self) -> None:
+        try:
+            # 接收线程持续阻塞读 socket，收到完整协议帧后再交给上层回调。
+            while not self.stop_event.is_set():
+                try:
+                    self._handle_incoming_frame()
+                except socket.timeout:
+                    continue
+        except (ConnectionError, OSError):
+            self.stop()
+        except Exception as exc:
+            logger.exception("Data receiver loop error with %s", self.peer_ip)
+            self.stop()
+
+    def run(self) -> None:
+        try:
+            # handler 本身只负责托管 send/recv 两个子线程及它们的生命周期。
+            self._send_thread = threading.Thread(target=self._sender_loop, daemon=True)
+            self._recv_thread = threading.Thread(
+                target=self._receiver_loop, daemon=True
+            )
+            self._send_thread.start()
+            self._recv_thread.start()
+            self._send_thread.join()
+            self._recv_thread.join()
+        except Exception as exc:
+            logger.exception("ControlConnectionHandler error with %s", self.peer_ip)
+        finally:
+            self.stop()

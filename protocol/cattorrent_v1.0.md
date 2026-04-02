@@ -102,6 +102,8 @@ uint32 piece_index
 ### **Response:** 
 **Command：PIEC**
 ```
+uint16 name_len
+bytes  filename
 uint32 piece_index
 uint32 data_len
 bytes  data
