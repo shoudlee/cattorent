@@ -40,3 +40,29 @@ class SimpleEventWaiter:
     def __init__(self, *, request_id):
         self.event = threading.Event()
         self.id = request_id
+        self._lock = threading.Lock()
+        self._result = None
+        self._error: Exception | None = None
+
+    def wait(self, timeout: float | None = None) -> bool:
+        return self.event.wait(timeout)
+
+    def set_result(self, result) -> None:
+        with self._lock:
+            self._result = result
+            self._error = None
+        self.event.set()
+
+    def set_error(self, error: Exception) -> None:
+        with self._lock:
+            self._error = error
+            self._result = None
+        self.event.set()
+
+    def get_result(self):
+        with self._lock:
+            error = self._error
+            result = self._result
+        if error is not None:
+            raise error
+        return result

@@ -67,10 +67,32 @@ class Client:
         if self.cattorrent_protocol.tcp_recv_handler is not None:
             self.cattorrent_protocol.tcp_recv_handler.stop()  # 停止TCP监听线程
             self.cattorrent_protocol.tcp_recv_handler.join()  # 等待TCP监听线程结束
+        if self.cattorrent_protocol.tcp_data_recv_handler is not None:
+            self.cattorrent_protocol.tcp_data_recv_handler.stop()
+            self.cattorrent_protocol.tcp_data_recv_handler.join()
 
-    def file(self, dst, filename):
-        """ """
-        pass
+    def file(self, peer_id, dst, filename):
+        try:
+            peer_uuid = uuid.UUID(peer_id)
+        except ValueError:
+            logger.warning("Invalid peer ID format. Please provide a valid UUID.")
+            return
+
+        meta_path = self.cattorrent_protocol.share_folder / f".{filename}.meta"
+        if not meta_path.exists():
+            self.cattorrent_protocol.get_peer_meta(peer_uuid, filename)
+            logger.warning(
+                "Meta for %s was requested from peer %s. Run the file command again after meta arrives.",
+                filename,
+                peer_uuid,
+            )
+            return
+
+        worker = self.cattorrent_protocol.start_download(peer_uuid, filename, dst)
+        if worker is None:
+            logger.warning("Failed to start download for %s.", filename)
+        else:
+            logger.info("Started download for %s to %s", filename, dst)
 
 
 def main():
@@ -98,8 +120,8 @@ def main():
             # 测试用
             case ["meta", peer_id, filename]:
                 client.get_meta(peer_id, filename)
-            case ["file", dst, filename]:
-                client.file(dst, filename)
+            case ["file", peer_id, dst, filename]:
+                client.file(peer_id, dst, filename)
             case _:
                 logger.warning("Unknown command. Please try again.")
 

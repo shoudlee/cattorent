@@ -3,22 +3,30 @@ import threading
 from dataclasses import dataclass
 from queue import Empty, Queue
 from typing import Callable
-from tcp_utils import SimpleEventWaiter
+
 from logging_setup import get_logger
 from protocol_codec import (
+    build_error_response,
+    build_getp_request,
+    build_getp_response,
     build_list_request,
     build_list_response,
     build_meta_request,
     build_meta_response,
-    build_getp_request,
     is_valid_meta_payload,
-    parse_list_response,
+    parse_error_response,
     parse_getp_request,
     parse_getp_response,
+    parse_list_response,
     parse_meta_request,
     unpack_frame_body,
 )
-from tcp_utils import close_socket_quietly, recv_exact, safe_get_peer_ip
+from tcp_utils import (
+    SimpleEventWaiter,
+    close_socket_quietly,
+    recv_exact,
+    safe_get_peer_ip,
+)
 
 
 logger = get_logger(__name__)
@@ -29,8 +37,10 @@ class ConnectionHandlerCallbacks:
     # 连接层通过回调访问上层业务，避免直接依赖 protocol 内部状态。
     list_local_files: Callable[[], dict[str, int]]
     load_meta_content: Callable[[str], bytes | None]
+    load_piece_content: Callable[[str, int], bytes | None]
     on_file_list: Callable[[str, list[tuple[str, int]]], None]
     on_meta_received: Callable[[str, str, bytes], None]
+    on_piece_received: Callable[[str, str, int, bytes], None]
 
 
 # 实现为一个线程，可以防止主线程阻塞
@@ -57,7 +67,6 @@ class ControlConnectionHandler(threading.Thread):
         self._closed = False
         self._send_thread: threading.Thread | None = None
         self._recv_thread: threading.Thread | None = None
-        self.data_handler: threading.Thread | None = None
 
     def stop(self) -> None:
         self.stop_event.set()
@@ -182,29 +191,73 @@ class ControlConnectionHandler(threading.Thread):
         finally:
             self.stop_event.set()
             self._close_socket_once()
-            self.manager.unregister_connection(self.peer_ip, self)
-
-    def register_accepted_data_connection(self, ip: str, sock: socket.socket):
-        """Create a data transfer handler for an accepted inbound TCP connection.这里不用socket.getpeername()是因为以前涉及到多个客户端端口"""
-        sock.settimeout(0.1)
-        self.cleanup_connection(ip)
-        self.data_handler = DataConnectionHandler(ip, socket)
-        self.data_handler.start()
+            self.manager.unregister_control_connection(self.peer_ip, self)
 
 
-class DataConnectionHandler:
+class DataConnectionHandler(threading.Thread):
     def __init__(
         self,
+        manager,
+        peer_ip: str,
         sock: socket.socket,
+        callbacks: ConnectionHandlerCallbacks,
     ):
         super().__init__(daemon=True)
+        self.manager = manager
+        self.peer_ip = peer_ip
         self.socket = sock
+        self.callbacks = callbacks
         self.stop_event = threading.Event()
         self._close_lock = threading.Lock()
         self._closed = False
-        self.queue = Queue.queue()
-        self.data_request_waiters: dict[int, SimpleEventWaiter] = {}
+        self.queue: Queue[dict] = Queue()
+        self.data_request_waiters: dict[tuple[str, int], SimpleEventWaiter] = {}
+        self._waiters_lock = threading.Lock()
         self.socket_send_lock = threading.Lock()
+        self._send_thread: threading.Thread | None = None
+        self._recv_thread: threading.Thread | None = None
+
+    def _waiter_key(self, filename: str, piece_index: int) -> tuple[str, int]:
+        return filename, piece_index
+
+    def send_getp_and_register_waiter(
+        self,
+        filename: str,
+        piece_index: int,
+    ) -> SimpleEventWaiter:
+        waiter = SimpleEventWaiter(request_id=f"{filename}:{piece_index}")
+        key = self._waiter_key(filename, piece_index)
+        with self._waiters_lock:
+            self.data_request_waiters[key] = waiter
+        try:
+            with self.socket_send_lock:
+                self.socket.sendall(build_getp_request(filename, piece_index))
+        except Exception:
+            with self._waiters_lock:
+                self.data_request_waiters.pop(key, None)
+            raise
+        return waiter
+
+    def cancel_waiter(self, filename: str, piece_index: int) -> None:
+        key = self._waiter_key(filename, piece_index)
+        with self._waiters_lock:
+            self.data_request_waiters.pop(key, None)
+
+    def _resolve_waiter(
+        self,
+        filename: str,
+        piece_index: int,
+    ) -> SimpleEventWaiter | None:
+        key = self._waiter_key(filename, piece_index)
+        with self._waiters_lock:
+            return self.data_request_waiters.pop(key, None)
+
+    def _flush_waiters_with_error(self, error: Exception) -> None:
+        with self._waiters_lock:
+            waiters = list(self.data_request_waiters.values())
+            self.data_request_waiters.clear()
+        for waiter in waiters:
+            waiter.set_error(error)
 
     def stop(self) -> None:
         self.stop_event.set()
@@ -223,14 +276,61 @@ class DataConnectionHandler:
         command = task.get("command")
         if command == "PIEC":
             filename = task["filename"]
-            piece_index = task["piece_number"]
-            file_piece = self.callbacks.on_piec_send(filename, piece_index)
+            piece_index = task["piece_index"]
+            try:
+                file_piece = self.callbacks.load_piece_content(filename, piece_index)
+            except ValueError:
+                file_piece = None
+                self.queue.put(
+                    {
+                        "command": "ERRO",
+                        "error_code": 2,
+                        "message": "bad request",
+                    }
+                )
+                return
+            except IndexError:
+                file_piece = None
+                self.queue.put(
+                    {
+                        "command": "ERRO",
+                        "error_code": 3,
+                        "message": "invalid piece",
+                    }
+                )
+                return
+            except Exception:
+                file_piece = None
+                self.queue.put(
+                    {
+                        "command": "ERRO",
+                        "error_code": 4,
+                        "message": "internal error",
+                    }
+                )
+                return
+
+            if file_piece is None:
+                self.queue.put(
+                    {
+                        "command": "ERRO",
+                        "error_code": 1,
+                        "message": "file not found",
+                    }
+                )
+                return
             with self.socket_send_lock:
                 self.socket.sendall(
-                    build_getp_request(filename, piece_index, file_piece)
+                    build_getp_response(filename, piece_index, file_piece)
                 )
-        else:
-            logger.error(f"Unkown command at data connection command: {command}.")
+            return
+        if command == "ERRO":
+            with self.socket_send_lock:
+                self.socket.sendall(
+                    build_error_response(task["error_code"], task["message"])
+                )
+            return
+        logger.error("Unknown command at data connection command: %s.", command)
 
     def _handle_incoming_frame(self) -> None:
         data_length = int.from_bytes(recv_exact(self.socket, 4), "big")
@@ -238,20 +338,46 @@ class DataConnectionHandler:
         command, payload = unpack_frame_body(body)
         if command == "GETP":
             # 具体处理逻辑调用移交给send_handler,不然它太闲(?)
-            filename, piece_number = parse_getp_request(payload)
+            try:
+                filename, piece_index = parse_getp_request(payload)
+            except ValueError:
+                self.queue.put(
+                    {
+                        "command": "ERRO",
+                        "error_code": 2,
+                        "message": "bad request",
+                    }
+                )
+                return
             self.queue.put(
                 {
                     "command": "PIEC",
                     "filename": filename,
-                    "piece_number": piece_number,
+                    "piece_index": piece_index,
                 }
             )
             return
         if command == "PIEC":
-            filename, piece_number, file_piece = parse_getp_response(payload)
-            self.callbacks.on_piec_received(
-                self.peer_ip, filename, piece_number, file_piece
+            filename, piece_index, file_piece = parse_getp_response(payload)
+            waiter = self._resolve_waiter(filename, piece_index)
+            if waiter is not None:
+                waiter.set_result(file_piece)
+            self.callbacks.on_piece_received(
+                self.peer_ip, filename, piece_index, file_piece
             )
+            return
+        if command == "ERRO":
+            error_code, message = parse_error_response(payload)
+            logger.warning(
+                "Received data error from %s: code=%s msg=%s",
+                self.peer_ip,
+                error_code,
+                message,
+            )
+            self._flush_waiters_with_error(
+                RuntimeError(f"Peer error {error_code}: {message}")
+            )
+            return
 
     def _sender_loop(self) -> None:
         try:
@@ -297,3 +423,4 @@ class DataConnectionHandler:
             logger.exception("ControlConnectionHandler error with %s", self.peer_ip)
         finally:
             self.stop()
+            self.manager.unregister_data_connection(self.peer_ip, self)
