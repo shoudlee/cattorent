@@ -138,12 +138,10 @@ class ConnectionManager:
         with self._lock:
             record = self._get_or_create_record(ip)
             old_handler = record.get("data")
-        handler = DataConnectionHandler(self, ip, sock, self.callbacks)
-        with self._lock:
-            record = self._get_or_create_record(ip)
+            if old_handler is not None:
+                old_handler.stop()
+            handler = DataConnectionHandler(self, ip, sock, self.callbacks)
             record["data"] = handler
-        if old_handler is not None:
-            old_handler.stop()
         handler.start()
         return handler
 
