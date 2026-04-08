@@ -88,11 +88,15 @@ class Client:
             )
             return
 
-        worker = self.cattorrent_protocol.start_download(peer_uuid, filename, dst)
-        if worker is None:
-            logger.warning("Failed to start download for %s.", filename)
-        else:
-            logger.info("Started download for %s to %s", filename, dst)
+        success, reason = self.cattorrent_protocol.start_download(
+            peer_uuid, filename, dst
+        )
+        if not success:
+            logger.warning(
+                "Download failed for %s to %s. reason=%s", filename, dst, reason
+            )
+            return
+        logger.info("Download complete for %s to %s", filename, dst)
 
 
 def main():

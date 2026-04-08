@@ -9,7 +9,8 @@ from pathlib import Path
 
 from connection_handler import ConnectionHandlerCallbacks
 from connections import ConnectionManager
-from download_worker import DownloadWorker
+
+from download_manager import DownloadManager
 
 
 class CattorrentProtocol:
@@ -53,7 +54,7 @@ class CattorrentProtocol:
         self.upd_handler: UdpBroadcastWorker | None = None
         self.tcp_recv_handler: TcpListenWorker | None = None
         self.tcp_data_recv_handler: TcpDataListenWorker | None = None
-        self.download_workers: list[DownloadWorker] = []
+        self.download_managers: list[DownloadManager] = []
 
     def get_peer(self, peer_id: uuid.UUID):
         """Ensure a control connection exists for peer_id and return its handler."""
@@ -202,23 +203,23 @@ class CattorrentProtocol:
         peer_entry = self.peers.get(peer_id)
         if peer_entry is None:
             print(f"Peer {peer_id} not found.")
-            return None
+            return False, "peer not found"
 
         peer_ip = peer_entry[0].ip
         data_handler = self.connection_manager.get_data_handler(ip=peer_ip)
         if data_handler is None:
             print(f"Cannot establish data connection to {peer_ip}")
-            return None
+            return False, f"cannot establish data connection to {peer_ip}"
 
         meta_path = self.share_folder / f".{filename}.meta"
         if not meta_path.exists():
             print(f"Missing meta file for {filename}, request meta first.")
-            return None
+            return False, f"missing meta file for {filename}"
 
         meta_info = MetaInfo()
         meta_info.from_file(meta_path)
 
-        worker = DownloadWorker(
+        download_manager = DownloadManager(
             data_handler=data_handler,
             filename=filename,
             destination_path=Path(destination),
@@ -228,9 +229,12 @@ class CattorrentProtocol:
             timeout_seconds=3.0,
             max_retries=3,
         )
-        self.download_workers.append(worker)
-        worker.start()
-        return worker
+        self.download_managers.append(download_manager)
+        try:
+            return download_manager.start_download()
+        finally:
+            if download_manager in self.download_managers:
+                self.download_managers.remove(download_manager)
 
     def encode_broadcast_message(self, command="ONLI"):
         reserved = 0

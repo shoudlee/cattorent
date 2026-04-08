@@ -1,3 +1,4 @@
+import queue
 import threading
 from pathlib import Path
 
@@ -19,6 +20,13 @@ class DownloadWorker(threading.Thread):
         slice_count: int,
         timeout_seconds: float = 3.0,
         max_retries: int = 3,
+        file_slice_queue: queue.Queue[int],
+        filelock: threading.Lock,
+        state_lock: threading.Lock,
+        completed_slices: set[int],
+        permanently_failed_slices: set[int],
+        failed_attempts: dict[int, int],
+        max_piece_failures: int = 3,
     ):
         super().__init__(daemon=True)
         self.data_handler = data_handler
@@ -30,7 +38,13 @@ class DownloadWorker(threading.Thread):
         self.timeout_seconds = timeout_seconds
         self.max_retries = max_retries
         self.stop_event = threading.Event()
-        self.completed_slices: set[int] = set()
+        self.filelock = filelock
+        self.state_lock = state_lock
+        self.file_slice_queue = file_slice_queue
+        self.completed_slices = completed_slices
+        self.permanently_failed_slices = permanently_failed_slices
+        self.failed_attempts = failed_attempts
+        self.max_piece_failures = max_piece_failures
 
     def stop(self):
         self.stop_event.set()
@@ -42,11 +56,6 @@ class DownloadWorker(threading.Thread):
             remaining = self.file_size - piece_index * self.slice_size
             return max(0, remaining)
         return self.slice_size
-
-    def _prepare_target_file(self) -> None:
-        self.destination_path.parent.mkdir(parents=True, exist_ok=True)
-        with open(self.destination_path, "wb") as file_obj:
-            file_obj.truncate(self.file_size)
 
     def _request_piece_once(self, piece_index: int) -> bytes | None:
         waiter = self.data_handler.send_getp_and_register_waiter(
@@ -83,48 +92,87 @@ class DownloadWorker(threading.Thread):
             )
         return None
 
+    def _mark_piece_failure(self, piece_index: int, reason: str) -> None:
+        with self.state_lock:
+            attempts = self.failed_attempts.get(piece_index, 0) + 1
+            self.failed_attempts[piece_index] = attempts
+
+            if attempts >= self.max_piece_failures:
+                self.permanently_failed_slices.add(piece_index)
+                logger.error(
+                    "Giving up piece file=%s piece=%s peer=%s attempts=%s reason=%s",
+                    self.filename,
+                    piece_index,
+                    self.data_handler.peer_ip,
+                    attempts,
+                    reason,
+                )
+                return
+
+        self.file_slice_queue.put(piece_index)
+        logger.warning(
+            "Requeued piece file=%s piece=%s peer=%s attempt=%s/%s reason=%s",
+            self.filename,
+            piece_index,
+            self.data_handler.peer_ip,
+            attempts,
+            self.max_piece_failures,
+            reason,
+        )
+
     def run(self) -> None:
         try:
-            self._prepare_target_file()
             with open(self.destination_path, "r+b") as file_obj:
-                for piece_index in range(self.slice_count):
+                while True:
                     if self.stop_event.is_set():
                         return
-                    if piece_index in self.completed_slices:
-                        continue
 
-                    piece_data = self._request_piece_with_retry(piece_index)
-                    if piece_data is None:
-                        logger.error(
-                            "Failed to download piece after retries: file=%s piece=%s",
-                            self.filename,
-                            piece_index,
-                        )
+                    try:
+                        piece_index = self.file_slice_queue.get(timeout=0.5)
+                    except queue.Empty:
                         return
+                    try:
+                        with self.state_lock:
+                            if piece_index in self.completed_slices:
+                                continue
+                            if piece_index in self.permanently_failed_slices:
+                                continue
 
-                    expected_size = self._piece_size_for_index(piece_index)
-                    if len(piece_data) > expected_size:
-                        logger.error(
-                            "Invalid piece length: file=%s piece=%s expected<=%s got=%s",
+                        piece_data = self._request_piece_with_retry(piece_index)
+                        if piece_data is None:
+                            self._mark_piece_failure(
+                                piece_index, "request timeout or peer error"
+                            )
+                            continue
+
+                        expected_size = self._piece_size_for_index(piece_index)
+                        if len(piece_data) != expected_size:
+                            self._mark_piece_failure(
+                                piece_index,
+                                f"invalid piece size expected={expected_size} got={len(piece_data)}",
+                            )
+                            continue
+
+                        offset = piece_index * self.slice_size
+                        with self.filelock:
+                            file_obj.seek(offset)
+                            file_obj.write(piece_data)
+
+                        with self.state_lock:
+                            self.completed_slices.add(piece_index)
+                            self.failed_attempts.pop(piece_index, None)
+
+                        logger.info(
+                            "Downloaded piece file=%s piece=%s/%s",
                             self.filename,
-                            piece_index,
-                            expected_size,
-                            len(piece_data),
+                            piece_index + 1,
+                            self.slice_count,
                         )
-                        return
-
-                    offset = piece_index * self.slice_size
-                    file_obj.seek(offset)
-                    file_obj.write(piece_data)
-                    self.completed_slices.add(piece_index)
-
-                    logger.info(
-                        "Downloaded piece file=%s piece=%s/%s",
-                        self.filename,
-                        piece_index + 1,
-                        self.slice_count,
-                    )
-
-            logger.info("Download complete: %s -> %s", self.filename, self.destination_path)
+                    finally:
+                        self.file_slice_queue.task_done()
         except Exception:
-            logger.exception("Download worker crashed for file=%s", self.filename)
+            logger.exception(
+                "Download worker crashed for file=%s, ip=%s",
+                self.filename,
+                self.data_handler.peer_ip,
+            )
