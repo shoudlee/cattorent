@@ -61,8 +61,11 @@ class ControlConnectionHandler(threading.Thread):
         self.stop_event = threading.Event()
         self.queue: Queue[dict] = Queue()
         self.pending_meta_filename: str | None = None
+        self.pending_meta_waiter: SimpleEventWaiter | None = None
+        self.pending_list_waiter: SimpleEventWaiter | None = None
         self.peer_ip = safe_get_peer_ip(sock) or "unknown"
         self._pending_meta_lock = threading.Lock()
+        self._pending_list_lock = threading.Lock()
         self._close_lock = threading.Lock()
         self._closed = False
         self._send_thread: threading.Thread | None = None
@@ -83,8 +86,45 @@ class ControlConnectionHandler(threading.Thread):
     def request_list(self) -> None:
         self.queue.put({"command": "LIST"})
 
+    def request_list_and_wait(self) -> SimpleEventWaiter:
+        waiter = SimpleEventWaiter(request_id=f"list:{self.peer_ip}")
+        with self._pending_list_lock:
+            self.pending_list_waiter = waiter
+        self.queue.put({"command": "LIST"})
+        return waiter
+
     def request_meta(self, filename: str) -> None:
         self.queue.put({"command": "META", "filename": filename})
+
+    def request_meta_and_wait(self, filename: str) -> SimpleEventWaiter:
+        waiter = SimpleEventWaiter(request_id=f"meta:{self.peer_ip}:{filename}")
+        with self._pending_meta_lock:
+            self.pending_meta_filename = filename
+            self.pending_meta_waiter = waiter
+        self.queue.put({"command": "META", "filename": filename})
+        return waiter
+
+    def _pop_pending_list_waiter(self) -> SimpleEventWaiter | None:
+        with self._pending_list_lock:
+            waiter = self.pending_list_waiter
+            self.pending_list_waiter = None
+        return waiter
+
+    def _pop_pending_meta(self) -> tuple[str | None, SimpleEventWaiter | None]:
+        with self._pending_meta_lock:
+            filename = self.pending_meta_filename
+            waiter = self.pending_meta_waiter
+            self.pending_meta_filename = None
+            self.pending_meta_waiter = None
+        return filename, waiter
+
+    def _flush_pending_waiters_with_error(self, error: Exception) -> None:
+        filename, meta_waiter = self._pop_pending_meta()
+        list_waiter = self._pop_pending_list_waiter()
+        if meta_waiter is not None:
+            meta_waiter.set_error(error)
+        if list_waiter is not None:
+            list_waiter.set_error(error)
 
     def _handle_outgoing_task(self, task: dict) -> None:
         # 所有主动发送的数据都统一从发送线程出队，避免多个线程直接写同一个 socket。
@@ -123,7 +163,11 @@ class ControlConnectionHandler(threading.Thread):
 
         if command == "RLST":
             files = parse_list_response(payload)
-            self.callbacks.on_file_list(self.peer_ip, files)
+            waiter = self._pop_pending_list_waiter()
+            if waiter is not None:
+                waiter.set_result(files)
+            else:
+                self.callbacks.on_file_list(self.peer_ip, files)
             return
 
         if command == "META":
@@ -135,11 +179,12 @@ class ControlConnectionHandler(threading.Thread):
             if not is_valid_meta_payload(payload):
                 logger.error("Received invalid meta payload from %s.", self.peer_ip)
                 return
-            with self._pending_meta_lock:
-                filename = self.pending_meta_filename
-                self.pending_meta_filename = None
+            filename, waiter = self._pop_pending_meta()
             if filename:
-                self.callbacks.on_meta_received(self.peer_ip, filename, payload)
+                if waiter is not None:
+                    waiter.set_result(payload)
+                else:
+                    self.callbacks.on_meta_received(self.peer_ip, filename, payload)
             else:
                 logger.warning(
                     "Received meta from %s but no pending filename, ignoring",
@@ -155,9 +200,11 @@ class ControlConnectionHandler(threading.Thread):
                 except Empty:
                     continue
                 self._handle_outgoing_task(task)
-        except (ConnectionError, OSError):
+        except (ConnectionError, OSError) as exc:
+            self._flush_pending_waiters_with_error(exc)
             self.stop()
         except Exception as exc:
+            self._flush_pending_waiters_with_error(exc)
             logger.exception("Sender loop error with %s", self.peer_ip)
             self.stop()
 
@@ -169,9 +216,11 @@ class ControlConnectionHandler(threading.Thread):
                     self._handle_incoming_frame()
                 except socket.timeout:
                     continue
-        except (ConnectionError, OSError):
+        except (ConnectionError, OSError) as exc:
+            self._flush_pending_waiters_with_error(exc)
             self.stop()
         except Exception as exc:
+            self._flush_pending_waiters_with_error(exc)
             logger.exception("Receiver loop error with %s", self.peer_ip)
             self.stop()
 

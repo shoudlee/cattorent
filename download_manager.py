@@ -13,7 +13,7 @@ class DownloadManager:
     def __init__(
         self,
         *,
-        data_handler,  # 初始data handler, 表示peer那个参数指定的
+        data_handlers,
         filename: str,
         destination_path: Path,
         file_size: int,
@@ -22,7 +22,9 @@ class DownloadManager:
         timeout_seconds: float = 3.0,
         max_retries: int = 3,
     ):
-        self.data_handler = data_handler
+        if not data_handlers:
+            raise ValueError("at least one data handler is required")
+        self.data_handlers = list(data_handlers)
         self.filename = filename
         self.destination_path = Path(destination_path)
         self.file_size = file_size
@@ -41,24 +43,26 @@ class DownloadManager:
         self.max_piece_failures = 3
         for i in range(slice_count):
             self.file_slice_queue.put(i)
-        self.worker_0 = DownloadWorker(
-            data_handler=data_handler,
-            filename=filename,
-            destination_path=destination_path,
-            file_size=file_size,
-            slice_size=slice_size,
-            slice_count=slice_count,
-            timeout_seconds=timeout_seconds,
-            max_retries=max_retries,
-            filelock=self._filelock,
-            state_lock=self._state_lock,
-            file_slice_queue=self.file_slice_queue,
-            completed_slices=self.completed_slices,
-            permanently_failed_slices=self.permanently_failed_slices,
-            failed_attempts=self.failed_attempts,
-            max_piece_failures=self.max_piece_failures,
-        )
-        self.download_workers = [self.worker_0]
+        self.download_workers = [
+            DownloadWorker(
+                data_handler=data_handler,
+                filename=filename,
+                destination_path=destination_path,
+                file_size=file_size,
+                slice_size=slice_size,
+                slice_count=slice_count,
+                timeout_seconds=timeout_seconds,
+                max_retries=max_retries,
+                filelock=self._filelock,
+                state_lock=self._state_lock,
+                file_slice_queue=self.file_slice_queue,
+                completed_slices=self.completed_slices,
+                permanently_failed_slices=self.permanently_failed_slices,
+                failed_attempts=self.failed_attempts,
+                max_piece_failures=self.max_piece_failures,
+            )
+            for data_handler in self.data_handlers
+        ]
 
     def start_download(self) -> tuple[bool, str | None]:
         for worker in self.download_workers:

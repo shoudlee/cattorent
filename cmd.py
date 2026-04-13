@@ -78,16 +78,6 @@ class Client:
             logger.warning("Invalid peer ID format. Please provide a valid UUID.")
             return
 
-        meta_path = self.cattorrent_protocol.share_folder / f".{filename}.meta"
-        if not meta_path.exists():
-            self.cattorrent_protocol.get_peer_meta(peer_uuid, filename)
-            logger.warning(
-                "Meta for %s was requested from peer %s. Run the file command again after meta arrives.",
-                filename,
-                peer_uuid,
-            )
-            return
-
         success, reason = self.cattorrent_protocol.start_download(
             peer_uuid, filename, dst
         )

@@ -56,6 +56,69 @@ class CattorrentProtocol:
         self.tcp_data_recv_handler: TcpDataListenWorker | None = None
         self.download_managers: list[DownloadManager] = []
 
+    def _request_meta_from_peer(
+        self,
+        peer_id: uuid.UUID,
+        filename: str,
+        timeout_seconds: float = 3.0,
+    ) -> bytes | None:
+        handler = self.get_peer(peer_id)
+        if handler is None:
+            return None
+        waiter = handler.request_meta_and_wait(filename)
+        if not waiter.wait(timeout_seconds):
+            return None
+        try:
+            return waiter.get_result()
+        except Exception:
+            return None
+
+    def _list_peer_files(
+        self,
+        peer_id: uuid.UUID,
+        timeout_seconds: float = 2.0,
+    ) -> list[tuple[str, int]] | None:
+        handler = self.get_peer(peer_id)
+        if handler is None:
+            return None
+        waiter = handler.request_list_and_wait()
+        if not waiter.wait(timeout_seconds):
+            return None
+        try:
+            return waiter.get_result()
+        except Exception:
+            return None
+
+    def _discover_candidate_data_handlers(
+        self,
+        *,
+        primary_peer_id: uuid.UUID,
+        filename: str,
+        file_size: int,
+    ) -> list:
+        candidate_handlers = []
+        candidate_ips: set[str] = set()
+        self.refresh_peers()
+        peers_snapshot = list(self.peers.items())
+
+        for candidate_peer_id, (peer_info, _) in peers_snapshot:
+            if candidate_peer_id == primary_peer_id:
+                continue
+            files = self._list_peer_files(candidate_peer_id)
+            if files is None:
+                continue
+            if not any(name == filename and size == file_size for name, size in files):
+                continue
+            if peer_info.ip in candidate_ips:
+                continue
+            data_handler = self.connection_manager.get_data_handler(ip=peer_info.ip)
+            if data_handler is None:
+                continue
+            candidate_handlers.append(data_handler)
+            candidate_ips.add(peer_info.ip)
+
+        return candidate_handlers
+
     def get_peer(self, peer_id: uuid.UUID):
         """Ensure a control connection exists for peer_id and return its handler."""
         self.refresh_peers()
@@ -206,21 +269,36 @@ class CattorrentProtocol:
             return False, "peer not found"
 
         peer_ip = peer_entry[0].ip
-        data_handler = self.connection_manager.get_data_handler(ip=peer_ip)
-        if data_handler is None:
-            print(f"Cannot establish data connection to {peer_ip}")
-            return False, f"cannot establish data connection to {peer_ip}"
-
         meta_path = self.share_folder / f".{filename}.meta"
-        if not meta_path.exists():
-            print(f"Missing meta file for {filename}, request meta first.")
-            return False, f"missing meta file for {filename}"
+        meta_content = self._request_meta_from_peer(peer_id, filename)
+        if meta_content is None:
+            print(f"Failed to fetch meta for {filename} from peer {peer_id}")
+            return False, f"failed to fetch meta for {filename} from peer {peer_id}"
+        meta_path.write_bytes(meta_content)
 
         meta_info = MetaInfo()
         meta_info.from_file(meta_path)
+        if (
+            meta_info.filesize is None
+            or meta_info.slice_size is None
+            or meta_info.total_slices is None
+        ):
+            return False, f"invalid meta file for {filename}"
+
+        primary_data_handler = self.connection_manager.get_data_handler(ip=peer_ip)
+        if primary_data_handler is None:
+            print(f"Cannot establish data connection to {peer_ip}")
+            return False, f"cannot establish data connection to {peer_ip}"
+
+        candidate_handlers = self._discover_candidate_data_handlers(
+            primary_peer_id=peer_id,
+            filename=filename,
+            file_size=meta_info.filesize,
+        )
+        all_data_handlers = [primary_data_handler, *candidate_handlers]
 
         download_manager = DownloadManager(
-            data_handler=data_handler,
+            data_handlers=all_data_handlers,
             filename=filename,
             destination_path=Path(destination),
             file_size=meta_info.filesize,
