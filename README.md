@@ -73,3 +73,8 @@ See:
 
 - `protocol/cattorrent_v0.1.md`
 - `protocol/cattorrent_v1.0.md`
+
+## Next...
+1. Add a tui?
+2. Add a slice priority algorithm?
+3. Transform into asyncio?

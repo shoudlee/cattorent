@@ -4,6 +4,7 @@ import struct
 import threading
 import time
 import uuid
+import asyncio
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -29,6 +30,8 @@ class CattorrentProtocol:
         broadcast_interval=2,
         share_folder="./catshare",
     ):
+        self._main_loop = asyncio.new_event_loop()
+        self._main_loop_thread = threading.Thread(target=self._main_loop.run_forever, daemon=True)
         self.ip = ip
         self.port = port
         self.data_port = data_port
@@ -51,10 +54,11 @@ class CattorrentProtocol:
             callbacks=callbacks, port=self.port, data_port=self.data_port
         )
 
-        self.upd_handler: UdpBroadcastWorker | None = None
+        self.upd_handler: AsyncUdpBroadcastWorker | None = None
         self.tcp_recv_handler: TcpListenWorker | None = None
         self.tcp_data_recv_handler: TcpDataListenWorker | None = None
         self.download_managers: list[DownloadManager] = []
+        self._main_loop_thread.start()
 
     def _request_meta_from_peer(
         self,
@@ -237,8 +241,10 @@ class CattorrentProtocol:
         )
 
     def start_protocol_upd_handler(self):
-        self.upd_handler = UdpBroadcastWorker(self)
-        self.upd_handler.start()
+        self.upd_handler = AsyncUdpBroadcastWorker(self)
+        # self._main_loop.create_task(self.upd_handler.run())
+        asyncio.run_coroutine_threadsafe(self.upd_handler.send(), self._main_loop)
+        asyncio.run_coroutine_threadsafe(self.upd_handler.recv(), self._main_loop)
 
     def start_protocol_tcp_handler(self):
         self.tcp_recv_handler = TcpListenWorker(self)
@@ -420,6 +426,39 @@ class UdpBroadcastWorker(threading.Thread):
             except Exception as e:
                 print(f"UDP Broadcast Worker error: {e}")
                 return
+
+class AsyncUdpBroadcastWorker:
+    def __init__(self, cattorrent_protocol: CattorrentProtocol):
+        self.cattorrent_protocol = cattorrent_protocol
+        self.ip = cattorrent_protocol.ip
+        self.port = cattorrent_protocol.port
+        self.broadcast_interval = cattorrent_protocol.broadcast_interval
+        self.stop_event = threading.Event()
+        self.socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+        self.socket.bind((self.ip, self.port))
+        self.socket.setblocking(False)
+        self.loop = cattorrent_protocol._main_loop
+    
+    async def send(self):
+        message = self.cattorrent_protocol.encode_broadcast_message()
+        while not self.stop_event.is_set():
+            await self.loop.sock_sendto(self.socket, message, ("255.255.255.255", self.port))
+            await asyncio.sleep(self.broadcast_interval)
+    
+    async def recv(self):
+        while not self.stop_event.is_set():
+            try:
+                data, addr = await self.loop.sock_recvfrom(self.socket, 1024)
+                # 这个handle_received_udp_packet()可能会涉及到同步的socket connect操作
+                # 不过应该没问题
+                await self.loop.run_in_executor(None, self.cattorrent_protocol.handle_received_udp_packet,
+                                          addr[0], addr[1], data)
+            except Exception as e:
+                print(f"Async UDP Broadcast Worker error: {e}")
+                return
+        
+
 
 
 class TcpListenWorker(threading.Thread):
